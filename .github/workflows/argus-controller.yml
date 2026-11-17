@@ -6,7 +6,7 @@ on:
         type: string
         default: manual
   workflow_run:
-    workflows: [Argus intake, Argus worker]
+    workflows: [Argus intake, Argus worker, Argus validate]
     types: [completed]
   schedule:
     - cron: '*/15 * * * *'
@@ -19,12 +19,12 @@ permissions:
   contents: read
 jobs:
   prepare:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
       actions: write
+      pull-requests: write
     outputs:
       think: ${{ steps.prepare.outputs.think }}
       source_sha: ${{ steps.prepare.outputs.source_sha }}

@@ -105,9 +105,12 @@ class GitStore:
         if self.git('cat-file', '-e', revision, check=False).returncode:
             self.git('fetch', '-q', '--depth=1', 'origin', revision)
         files = {}
+        present = self.git('ls-tree', '--name-only', revision, '--', prefix)
+        if not present.stdout.strip():
+            return files
         archive = self.git('archive', revision, '--', prefix, check=False)
         if archive.returncode:
-            return files
+            raise ContractError('Cannot read the pinned runtime snapshot')
         with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode='r:') as entries:
             for entry in entries:
                 if entry.isdir():

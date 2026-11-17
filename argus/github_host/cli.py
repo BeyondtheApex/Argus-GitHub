@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import download_result
-from .git_store import GitStore
+from .git_store import GitStore, StateConflict
 from .github import GitHub, approved_issue
 from .host import (
     PROJECT_PATH,
@@ -22,6 +22,7 @@ from .host import (
     publish_controller,
     read_project,
     reconcile_runs,
+    recover_failed_runs,
     should_think,
 )
 from .protocol import ContractError, Project, Task, canonical, commit_sha, identifier
@@ -69,6 +70,10 @@ def bundle(store: GitStore, project: Project, destination: Path,
 
 
 def prepare(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
+    if store.read(PROJECT_PATH) is None and not args.task_id:
+        output('think', 'false')
+        output('reason', 'not_initialized')
+        return
     project = read_project(store)
     metadata = api.request('GET', '/')
     if metadata['id'] != project.repository_id:
@@ -82,26 +87,49 @@ def prepare(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
             raise ContractError('The project is paused or cancelled')
         if task.runtime_sha != os.environ.get('GITHUB_SHA', task.runtime_sha):
             raise ContractError('Worker runtime version does not match the task')
+        current_run = int(os.environ.get('GITHUB_RUN_ID', '0'))
+        if current_run:
+            if task.run_id and task.run_id != current_run:
+                output('execute', 'false')
+                return
+            task.run_id = current_run
+            task.state = 'running'
+            project.tasks[task.id] = task.json()
+            store.write(PROJECT_PATH, project.json())
+            store.publish('Claim remote task for exactly one workflow run')
+        output('execute', 'true')
         bundle(store, project, args.output, task=task)
         output('source_sha', task.source_sha)
         profile = store.read(SETTINGS_PATH, {}).get('profiles', {}).get(task.profile)
         if not profile or not isinstance(profile.get('runs_on'), list):
             raise ContractError('Worker resource profile has not been configured')
         output('runs_on', json.dumps(profile['runs_on']))
+        timeout = int(profile.get('timeout_minutes', 60))
+        if not 5 <= timeout <= 360:
+            raise ContractError('Worker timeout must be between 5 and 360 minutes')
+        output('timeout', timeout)
         return
     consumed = ingest_commands(store, project)
     ready_results = reconcile_runs(project, api)
+    recover_failed_runs(store, project)
     store.write(PROJECT_PATH, project.json())
     new_results = 0
     for run_id in ready_results:
         disposition = accept_worker(store, download_result(api, run_id), api=api)
         new_results += disposition in {'accepted', 'conflict'}
     project = read_project(store)
+    from .delivery import reconcile_deliveries
+    delivery_changes = reconcile_deliveries(store, project, api, store.read(SETTINGS_PATH, {}))
+    source = commit_sha(api.request('GET', '/git/ref/heads/' + metadata['default_branch'])['object']['sha'])
+    if source != project.source_sha:
+        project.source_sha = source
+        project.continuations = {'requested': True, 'reason': 'source_changed'}
+    store.write(PROJECT_PATH, project.json())
     store.publish('Reconcile trusted repository events and worker runs')
     flush_dispatches(store, api)
     store.publish('Recover pending dispatch acknowledgements')
     project = read_project(store)
-    think = should_think(project, new_events=bool(consumed or new_results))
+    think = should_think(project, new_events=bool(consumed or new_results or delivery_changes))
     output('think', 'true' if think else 'false')
     output('source_sha', project.source_sha)
     output('runtime_sha', project.runtime_sha)
@@ -117,9 +145,11 @@ def execute(args: argparse.Namespace) -> None:
     project = Project.read(manifest['project'])
     task = Task.read(manifest['task']) if manifest['task'] else None
     state_root = args.runtime.resolve()
-    restore(state_root, capture(args.bundle / 'runtime'))
-    before = capture(state_root)
     source = args.worktree.resolve()
+    from .portability import configure_provider_state, rebase
+    before = capture(args.bundle / 'runtime')
+    restore(state_root, rebase(before, state_root, source, portable=False))
+    configure_provider_state(state_root, owner=task.item_id if task else 'controller')
     actual_source = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=source,
         check=True, capture_output=True, text=True).stdout.strip()
     expected = task.source_sha if task else project.source_sha
@@ -130,7 +160,7 @@ def execute(args: argparse.Namespace) -> None:
     started = time.monotonic()
     native = run_slice(project, state_root, source, manifest['settings'],
                        worker_item=task.item_id if task else None)
-    after = capture(state_root)
+    after = rebase(capture(state_root), state_root, source, portable=True)
     delta = make_delta(before, after)
     metrics = {'execution_seconds': time.monotonic() - started,
                'snapshot_bytes': sum(len(data) for data in after.values()),
@@ -138,7 +168,7 @@ def execute(args: argparse.Namespace) -> None:
     if task:
         # Include new non-ignored files in the reviewable candidate patch.
         subprocess.run(['git', 'add', '--intent-to-add', '--all'], cwd=source, check=True)
-        patch = subprocess.run(['git', 'diff', '--binary', 'HEAD', '--', '.'], cwd=source,
+        patch = subprocess.run(['git', 'diff', '--binary', expected, '--', '.'], cwd=source,
                                check=True, capture_output=True).stdout
         result = {'schema': 1, 'repository_id': project.repository_id, 'task_id': task.id,
             'attempt': task.attempt, 'goal_revision': task.goal_revision, 'runtime_sha': task.runtime_sha,
@@ -217,6 +247,17 @@ def main() -> int:
         return 0
     token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN', '')
     api = GitHub(args.repository, token)
+    for attempt in range(5):
+        try:
+            return _transaction(args, api, token)
+        except StateConflict:
+            if attempt == 4:
+                raise
+            time.sleep(min(2 ** attempt, 8))
+    return 1
+
+
+def _transaction(args: argparse.Namespace, api: GitHub, token: str) -> int:
     with GitStore(args.repository, token=token, branch=args.branch) as store:
         store.load()
         if args.command == 'intake':
@@ -240,5 +281,7 @@ def main() -> int:
                 raise ContractError('Worker artifact belongs to another run')
             outcome = accept_worker(store, result, api=api)
             store.publish('Accept verified worker result and checkpoint')
+            flush_dispatches(store, api)
+            store.publish('Record delivery validation dispatch')
             output('result', outcome)
     return 0

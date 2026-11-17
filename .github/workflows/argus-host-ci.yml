@@ -1,0 +1,38 @@
+name: Argus host compatibility
+on:
+  push:
+    branches: [github-host]
+  pull_request:
+    branches: [github-host]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+      - run: python -m pip install pytest pytest-xdist ruff
+      - working-directory: runtime
+        run: |
+          python -m ruff check argus/github_host tests/github_host
+          python -m pytest tests/github_host tests/life/test_supervisor.py tests/life/test_terminal_idle_token_efficiency.py tests/life/test_backend_failure_circuit.py tests/life/test_subagent_family_failures.py tests/life/test_supervisor_project_state_root.py -q -n 4
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+      - working-directory: runtime
+        run: |
+          npm --prefix frontend/web ci
+          npm --prefix frontend/web run build
+          npm --prefix frontend/web test

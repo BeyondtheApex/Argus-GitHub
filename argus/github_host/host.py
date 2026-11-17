@@ -1,6 +1,7 @@
 """Trusted repository state transitions; no model or project code executes here."""
 from __future__ import annotations
 
+import copy
 import json
 import time
 from pathlib import Path
@@ -23,6 +24,14 @@ def read_project(store: GitStore) -> Project:
 
 
 def accept_command(project: Project, command: dict[str, Any]) -> bool:
+    candidate = copy.deepcopy(project)
+    changed = _accept_command(candidate, command)
+    if changed:
+        project.__dict__.update(candidate.__dict__)
+    return changed
+
+
+def _accept_command(project: Project, command: dict[str, Any]) -> bool:
     """Caller has verified the actor against GitHub, never against model text."""
     if not command.get('approved_by'):
         raise ContractError('Command has no authenticated maintainer')
@@ -71,6 +80,9 @@ def ingest_commands(store: GitStore, project: Project) -> list[str]:
             continue
         accept_command(project, command)
         consumed.append(command['id'])
+        destination = store.root / 'receipts' / path.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        path.replace(destination)
     return consumed
 
 
@@ -111,14 +123,19 @@ def publish_controller(store: GitStore, proposal: dict[str, Any], *, settings: d
         project.queue(task)
     project.accept_event(event_id, {'digest': digest(proposal)})
     stopped = proposal.get('native_outcome', {}).get('stopped_by', '')
-    if stopped == 'project_done' and not project.open_ended:
+    if stopped == 'project_done' and not project.open_ended and not active and not candidates:
         project.status = 'completed'
     has_work = bool(proposal.get('next_pending'))
     # Native retry/budget/provider decisions remain visible. Transient retries
     # are scheduled; settled waits require an actual event or an explicit due time.
-    wait = stopped in {'await_external', 'terminal_idle', 'paused_operator',
+    wait = stopped in {'await_external', 'awaiting_external', 'terminal_idle', 'paused_operator',
                        'operator_decision_required', 'paused_provider_fence',
                        'paused_budget', 'paused_cost', 'auth_failure'}
+    if stopped == 'manager_config_pending' and active and not has_work:
+        wait = True
+    for feedback in project.feedback:
+        if feedback['id'] in proposal.get('consumed_feedback', []):
+            feedback['consumed'] = True
     project.continuations = {
         'requested': project.status == 'active' and not wait and (has_work or not candidates),
         'reason': stopped, 'not_before': time.time() + (60 if stopped == 'planner_retry' else 0),
@@ -158,10 +175,21 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
     task.finished_at = time.time()
     # A successful Action means an execution report exists. Native outcome and
     # later PR/research acceptance still decide what has actually been achieved.
-    task.state = 'completed' if result.get('execution_completed') else 'failed'
+    task.state = 'completed' if outcome.get('success') else 'failed'
     task.evidence = {'native_outcome': outcome, 'run_id': task.run_id,
                      'source_sha': task.source_sha, 'changes': result.get('changes', {})}
     project.tasks[task.id] = task.json()
+    if api is not None and result.get('changes', {}).get('patch_b64'):
+        from .delivery import hold_backlog, publish_candidate
+        delivery = publish_candidate(api, task, result, store.read(SETTINGS_PATH, {}))
+        if delivery:
+            hold_backlog(store, project, task, delivery)
+            project.deliveries[task.id] = delivery
+            task.state = 'awaiting_review'
+            project.tasks[task.id] = task.json()
+    if result.get('execution_completed'):
+        project.feedback.append({'id': f'{task.id}.{task.attempt}', 'consumed': False,
+                                 'outcome': outcome, 'task_id': task.id})
     project.continuations = {'requested': project.status == 'active', 'reason': 'worker_result'}
     store.write(PROJECT_PATH, project.json())
     return 'accepted'
@@ -173,6 +201,13 @@ def flush_dispatches(store: GitStore, api: GitHub, *, lease_seconds: int = 21600
     if project.status != 'active':
         return 0
     count = 0
+    for delivery in project.deliveries.values():
+        if delivery.get('validation_pending'):
+            api.request('POST', '/actions/workflows/argus-validate.yml/dispatches', {
+                'ref': api.runtime_tag(delivery['runtime_sha']),
+                'inputs': {'task_id': delivery['task_id'], 'candidate_sha': delivery['head_sha'],
+                           'validation_key': delivery['validation_key']}})
+            delivery['validation_pending'] = False
     for key, operation in project.outbox.items():
         if operation.get('kind') != 'dispatch' or operation['status'] != 'pending':
             continue
@@ -211,7 +246,7 @@ def reconcile_runs(project: Project, api: GitHub, *, max_attempts: int = 3) -> l
                 completed.append(run['id'])
             else:
                 task.last_error = f"GitHub execution ended: {run['conclusion']}"
-                task.state = 'failed' if task.attempt >= max_attempts else 'blocked'
+                task.state = 'failed'
                 project.continuations = {'requested': True, 'reason': 'worker_failed'}
         else:
             task.run_id, task.state = run['id'], 'running'
@@ -242,5 +277,19 @@ def restore_failed_item(runtime_root: Path, project: Project, task_id: str) -> N
     backlog = Backlog(runtime_root / 'projects' / project.id / 'backlog.jsonl')
     item = next((row for row in backlog.active() if row.id == task.item_id), None)
     if item is not None and item.status == 'running':
-        backlog.update(item.id, status='pending', started_ts=None, running_owner='',
+        backlog.update(item.id, status='pending' if item.orphan_retries < 3 else 'failed', started_ts=None, running_owner='',
                        last_error=task.last_error, orphan_retries=item.orphan_retries + 1)
+
+
+def recover_failed_runs(store: GitStore, project: Project) -> int:
+    recovered = 0
+    for task in project.tasks.values():
+        if (task['state'] not in {'failed', 'blocked'} or task.get('result_digest')
+                or task['evidence'].get('recovered') or task['goal_revision'] != project.goal_revision):
+            continue
+        if task['state'] == 'blocked':
+            continue  # ambiguity/conflicts need evidence, not another blind attempt
+        restore_failed_item(store.root / 'runtime', project, task['id'])
+        task['evidence']['recovered'] = True
+        recovered += 1
+    return recovered

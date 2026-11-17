@@ -13,6 +13,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
+from ..life.memory import Backlog
 from ..life.supervisor import LifeSupervisor
 from .protocol import ContractError, Project, canonical
 
@@ -26,6 +27,32 @@ class _Sink:
 
     def close(self) -> None:
         return None
+
+
+class DeliveryBacklog(Backlog):
+    def __init__(self, path: Path, held: set[str]) -> None:
+        super().__init__(path)
+        self.held = held
+
+    def _done_ids(self, items: Any) -> set[str]:
+        return super()._done_ids(items) - self.held
+
+    def _is_ready(self, item: Any, done: Any) -> bool:
+        return item.id not in self.held and super()._is_ready(item, done)
+
+    def resume_paused(self, item_id: str) -> Any:
+        return None if item_id in self.held else super().resume_paused(item_id)
+
+
+class AuthorizedBacklog(DeliveryBacklog):
+    """Keep native readiness/claim policy while selecting only the leased item."""
+
+    def __init__(self, path: Path, item_id: str, held: set[str]) -> None:
+        super().__init__(path, held)
+        self.authorized_item = item_id
+
+    def _is_ready(self, item: Any, done: Any) -> bool:
+        return item.id == self.authorized_item and super()._is_ready(item, done)
 
 
 def _pack(value: Any) -> Any:
@@ -96,11 +123,13 @@ class RepositorySupervisor(LifeSupervisor):
         self._host_executed = False
         self._host_plans = 0
         self._host_waiting = False
+        self._host_feedback: list[dict[str, Any]] = []
+        self._host_consumed_feedback: list[str] = []
         super().__init__(**kwargs)
         prior_yield = self.config.manager_pipeline_yield_provider
         self.config.manager_pipeline_yield_provider = lambda: (
             self._host_executed or self._host_waiting
-            or len(self._host_dispatches) >= self._host_slots
+            or (self._host_slots > 0 and len(self._host_dispatches) >= self._host_slots)
             or time.monotonic() >= self._host_deadline
             or bool(prior_yield and prior_yield()))
         prior_gate = self.config.planner_cycle_gate
@@ -119,7 +148,16 @@ class RepositorySupervisor(LifeSupervisor):
 
     def _plan_next_work(self, *args: Any, **kwargs: Any) -> Any:
         self._host_plans += 1
-        return super()._plan_next_work(*args, **kwargs)
+        result = super()._plan_next_work(*args, **kwargs)
+        if result is False and getattr(self.memory.backlog, 'held', set()):
+            from ..life.supervisor._core import _PLAN_AWAITING
+            return _PLAN_AWAITING
+        return result
+
+    def _bounded_completion_reason(self) -> Any:
+        if getattr(self.memory.backlog, 'held', set()):
+            return ''
+        return super()._bounded_completion_reason()
 
     def _run_one(self, item: Any) -> dict[str, Any]:
         if self._host_worker_item is not None:
@@ -128,6 +166,8 @@ class RepositorySupervisor(LifeSupervisor):
                         'reason': 'This worker is authorized for another item'}
             self._host_executed = True
             return super()._run_one(item)
+        if len(self._host_dispatches) >= self._host_slots:
+            return {'status': 'claim_lost', 'item_id': item.id, 'reason': 'Remote mission slots occupied'}
         claimed = self.memory.backlog.claim_next(
             parallel_only=bool(self.config.parallel_worker),
             respect_running=True, expected_id=item.id, owner='github-actions')
@@ -137,6 +177,26 @@ class RepositorySupervisor(LifeSupervisor):
         self._missions_started += 1
         return {'status': 'repository_dispatched', 'item_id': item.id,
                 'success': False, 'recoverable': True}
+
+    def tick(self) -> dict[str, Any] | None:
+        if self._host_feedback:
+            event = self._host_feedback.pop(0)
+            self._host_consumed_feedback.append(event['id'])
+            self._last_mission_item_id = event['outcome'].get('item_id', '')
+            report = event['outcome'].get('planner_report') or {}
+            self._update_no_progress_streak(kind='mission_complete', report=report)
+            return event['outcome']
+        return super().tick()
+
+    def _maybe_second_reading(self, outcome: dict[str, Any]) -> Any:
+        if outcome.get('status') == 'repository_dispatched':
+            return None
+        return super()._maybe_second_reading(outcome)
+
+    def _fail_running_items_after_supervisor_error(self, error: str) -> list[str]:
+        if self._host_worker_item is None:
+            return []  # remote executions remain live when this planner fails
+        return super()._fail_running_items_after_supervisor_error(error)
 
 
 def build_runtime(project: Project, state_root: Path, worktree: Path,
@@ -155,6 +215,9 @@ def build_runtime(project: Project, state_root: Path, worktree: Path,
     memory = MemoryBundle.for_cwd(worktree, global_root=state_root,
                                  fingerprint=project.id, label=project.repository)
     memory.init()
+    held = {project.tasks[key]['item_id'] for key, row in project.deliveries.items()
+            if row['state'] in {'awaiting_review', 'blocked'}}
+    memory.project.backlog = DeliveryBacklog(memory.project.backlog.path, held)
     from ..core.session import SessionMeta, read_session_meta, write_session_meta
 
     if read_session_meta(state_root, project.id) is None:
@@ -190,6 +253,13 @@ def build_runtime(project: Project, state_root: Path, worktree: Path,
     namespace = _runner_namespace(cfg)
     namespace.stop_event = stop
     runner = build_life_runner(namespace)
+    if cfg.backend != 'memory':
+        from ..apps._runtime_construction import _resolve_role_runner_backend_name
+        for role in ('engineer', 'reviewer', 'planner', 'manager', 'curator'):
+            backend = getattr(runner, role + '_backend', None)
+            expected = _resolve_role_runner_backend_name(role, cfg.backend)
+            if backend is not None and backend.backend != expected:
+                raise ContractError(f'Requested {role} backend {expected} is unavailable; refusing silent fallback')
     sink = JsonlEventSink(_Sink(), life_dir=memory.project_root, verbosity=cfg.event_log_verbosity)
     config = _build_supervisor_config(cfg, runtime_root=memory.project_root,
         stop_event=stop, init_continuous=True, init_objective=project.objective,
@@ -206,14 +276,20 @@ def build_runtime(project: Project, state_root: Path, worktree: Path,
         engineer_model=cfg.engineer_model, reviewer_model=cfg.reviewer_model,
         planner_runner=getattr(runner, 'planner_backend', None) or getattr(runner, 'backend', None),
         skill_store=getattr(runner, '_manager_skill_store', None), dispatches=dispatches,
-        slots=max(1, cfg.mission_width), deadline=time.monotonic() + float(settings.get('slice_seconds', 2400)),
+        slots=(1 if worker_item else max(0, cfg.mission_width - sum(
+            row['state'] in {'pending', 'dispatched', 'running', 'awaiting_review'}
+            for row in project.tasks.values()))),
+        deadline=time.monotonic() + float(settings.get('slice_seconds', 2400)),
         worker_item=worker_item)
     restore_supervisor(supervisor, memory.project_root / 'repository-supervisor.json')
+    if not worker_item:
+        supervisor._host_feedback = [row for row in project.feedback if not row.get('consumed')]
     if worker_item:
         item = next((item for item in memory.backlog.active() if item.id == worker_item), None)
         if item is None or item.status != 'running':
             raise ContractError('The authorized task is absent from its pinned snapshot')
         memory.backlog.update(worker_item, status='pending', running_owner='', started_ts=None)
+        memory.project.backlog = AuthorizedBacklog(memory.project.backlog.path, worker_item, held)
     # Native interruption logic checkpoints between model/tool rounds; a soft
     # deadline precedes the Actions job deadline, leaving time to upload state.
     timer = threading.Timer(float(settings.get('slice_seconds', 2400)), stop.set)
@@ -228,11 +304,16 @@ def run_slice(project: Project, state_root: Path, worktree: Path,
     supervisor, memory, dispatches = build_runtime(project, state_root, worktree, settings,
                                                  worker_item=worker_item)
     try:
-        outcome = supervisor.run()
+        # Workers execute the original mission including Engineer/Reviewer. The
+        # main supervisor later replays the outcome through its original run loop
+        # to adjudicate challenges, second readings and further planning.
+        outcome = supervisor.tick() if worker_item else supervisor.run()
+        outcome = outcome or {'status': 'no_authorized_work', 'success': False}
         return {'native_outcome': outcome, 'dispatches': dispatches,
                 'worker_executed': supervisor._host_executed,
                 'planning_cycles_this_slice': supervisor._host_plans,
-                'next_pending': memory.backlog.next_pending(respect_running=True) is not None}
+                'next_pending': memory.backlog.next_pending(respect_running=True) is not None,
+                'consumed_feedback': supervisor._host_consumed_feedback}
     finally:
         supervisor._host_timer.cancel()
         # Worker continuations are merged separately from controller counters.

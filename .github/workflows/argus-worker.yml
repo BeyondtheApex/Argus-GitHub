@@ -24,9 +24,13 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     outputs:
       source_sha: ${{ steps.prepare.outputs.source_sha }}
       runs_on: ${{ steps.prepare.outputs.runs_on }}
+      execute: ${{ steps.prepare.outputs.execute }}
+      timeout: ${{ steps.prepare.outputs.timeout }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -41,7 +45,8 @@ jobs:
           TASK_ATTEMPT: ${{ inputs.attempt }}
           STATE_COMMIT: ${{ inputs.state_commit }}
         run: python -m argus.github_host prepare --task-id "$TASK_ID" --attempt "$TASK_ATTEMPT" --state-commit "$STATE_COMMIT" --output host-input
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - if: steps.prepare.outputs.execute == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: argus-worker-input
           path: host-input
@@ -49,8 +54,9 @@ jobs:
           retention-days: 2
   execute:
     needs: prepare
+    if: needs.prepare.outputs.execute == 'true'
     runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
-    timeout-minutes: 55
+    timeout-minutes: ${{ fromJSON(needs.prepare.outputs.timeout) }}
     permissions:
       contents: read
     steps:
@@ -88,7 +94,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
-      actions: read
+      actions: write
       pull-requests: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262

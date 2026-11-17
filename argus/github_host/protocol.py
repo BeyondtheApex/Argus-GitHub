@@ -112,6 +112,9 @@ class Project:
     accepted_requests: list[dict[str, Any]] = field(default_factory=list)
     continuations: dict[str, Any] = field(default_factory=dict)
     goal_history: list[dict[str, Any]] = field(default_factory=list)
+    feedback: list[dict[str, Any]] = field(default_factory=list)
+    deliveries: dict[str, dict[str, Any]] = field(default_factory=dict)
+    runtime_history: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def read(cls, value: dict[str, Any]) -> Project:
@@ -150,7 +153,8 @@ class Project:
         if self.status != 'active' or task.goal_revision != self.goal_revision:
             raise ContractError('Task cannot be dispatched under the current goal/status')
         existing = self.tasks.get(task.id)
-        if existing and existing != task.json():
+        retry = existing and existing['state'] in {'failed', 'blocked'} and task.attempt == existing['attempt'] + 1
+        if existing and existing != task.json() and not retry:
             raise ContractError('Task id reused for different work')
         self.tasks[task.id] = task.json()
         key = f'{task.id}.{task.attempt}'

@@ -4,6 +4,12 @@
   "slice_seconds": 2400,
   "event_log_verbosity": "full",
   "global_daily_cap_usd": 0,
+  "auto_merge": false,
+  "allow_workflow_edits": false,
+  "validation_commands": [
+    ["python", "-m", "pip", "install", "-e", ".", "pytest", "httpx"],
+    ["python", "-m", "pytest", "tests/github_host", "-q"]
+  ],
   "profiles": {
     "ubuntu": {"runs_on": ["ubuntu-latest"], "timeout_minutes": 60}
   }

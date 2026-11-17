@@ -1,0 +1,133 @@
+"""Publish untrusted patches as reviewable Git candidates; never execute them."""
+from __future__ import annotations
+
+import base64
+import json
+import time
+from typing import Any
+
+from .git_store import GitStore
+from .github import GitHub
+from .protocol import ContractError, Project, Task, commit_sha
+from .snapshots import safe_path
+
+
+def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any] | None:
+    encoded = result.get('changes', {}).get('patch_b64', '')
+    if not encoded:
+        return None
+    patch = base64.b64decode(encoded, validate=True)
+    if not patch:
+        return None
+    if len(patch) > int(settings.get('max_patch_bytes', 32 * 1024 * 1024)):
+        raise ContractError('Candidate exceeds the configured patch size limit')
+    branch = f'argus/task/{task.id}-{task.attempt}'
+    with GitStore(api.repository, token=api._token, branch=branch) as candidate:
+        candidate.load(revision=task.source_sha)
+        candidate.git('apply', '--cached', '--binary', '--whitespace=nowarn', '-', data=patch)
+        names = candidate.git('diff', '--cached', '--name-only', '-z').stdout.decode('utf-8').split('\0')
+        for name in filter(None, names):
+            safe_path(name)
+            parts = name.lower().split('/')
+            if any(p in {'.env', 'auth.json', '.argus-skill', '.argus_subagents'} for p in parts):
+                raise ContractError('Machine state or credentials cannot be published as project code')
+            if name.startswith('.github/workflows/') and not settings.get('allow_workflow_edits', False):
+                raise ContractError('Workflow edits need an explicitly configured publishing policy')
+            if task.parallel_safe and task.owns_paths and not any(
+                name == root.rstrip('/') or name.startswith(root.rstrip('/') + '/') for root in task.owns_paths
+            ):
+                raise ContractError('Parallel candidate changed paths outside its lease')
+        rows = candidate.git('diff', '--cached', '--raw', '-z').stdout.decode('utf-8').split('\0')
+        if any(row.startswith(':') and row.split()[1] in {'120000', '160000'} for row in rows):
+            raise ContractError('Candidate symlinks/submodules require separate explicit review')
+        # Commit only the validated index. No checkout, hooks or repository code.
+        candidate.git('-c', 'core.hooksPath=/dev/null', 'commit', '-q', '-m', f'Argus task {task.item_id}')
+        revision = candidate.git('rev-parse', 'HEAD').stdout.decode().strip()
+        existing = candidate.git('ls-remote', 'origin', 'refs/heads/' + branch).stdout.decode().split()
+        if existing:
+            revision = commit_sha(existing[0])
+            candidate.git('fetch', '-q', '--depth=1', 'origin', revision)
+            expected_tree = candidate.git('rev-parse', 'HEAD^{tree}').stdout
+            actual_tree = candidate.git('rev-parse', revision + '^{tree}').stdout
+            if expected_tree != actual_tree:
+                raise ContractError('Existing delivery branch differs from the authorized patch')
+        else:
+            candidate.git('push', 'origin', f'HEAD:refs/heads/{branch}')
+    owner = api.repository.split('/')[0]
+    prs = api.request('GET', f'/pulls?state=all&head={owner}:{branch}')
+    if prs:
+        pr = prs[0]
+        if pr['head']['sha'] != revision:
+            raise ContractError('Candidate PR head changed unexpectedly')
+    else:
+        metadata = api.request('GET', '/')
+        pr = api.request('POST', '/pulls', {
+            'title': f'Argus: {task.item_id}', 'head': branch, 'base': metadata['default_branch'],
+            'body': f'Candidate for task `{task.id}`, attempt {task.attempt}.\n\n'
+                    f'Goal revision: {task.goal_revision}. Source: `{task.source_sha}`.\n'
+                    f'Native execution evidence: Actions run {result["run_id"]}.\n\n'
+                    'Delivery remains pending until the candidate is validated and merged.',
+            'draft': not bool(result.get('outcome', {}).get('success'))})
+    validation_key = f'{task.id}-{task.attempt}-{revision[:12]}'
+    return {'task_id': task.id, 'attempt': task.attempt, 'state': 'awaiting_review',
+            'pr': pr['number'], 'url': pr['html_url'], 'head_sha': revision,
+            'source_sha': task.source_sha, 'runtime_sha': task.runtime_sha,
+            'validation_key': validation_key, 'validation_pending': True,
+            'native_success': bool(result['outcome'].get('success')),
+            'created_at': time.time()}
+
+
+def hold_backlog(store: GitStore, project: Project, task: Task, delivery: dict[str, Any]) -> None:
+    from ..life.memory import Backlog
+    backlog = Backlog(store.root / 'runtime' / 'projects' / project.id / 'backlog.jsonl')
+    item = next((row for row in backlog.history() if row.id == task.item_id), None)
+    if item is not None:
+        delivery['native_status'] = item.status
+        # Terminal native receipts are immutable. DeliveryBacklog masks their
+        # dependency readiness until the separate GitHub delivery is accepted.
+
+
+def reconcile_deliveries(store: GitStore, project: Project, api: GitHub, settings: dict[str, Any]) -> int:
+    from ..life.memory import Backlog
+    changed = 0
+    for task_id, delivery in project.deliveries.items():
+        if delivery['state'] != 'awaiting_review':
+            continue
+        pr = api.request('GET', f'/pulls/{int(delivery["pr"])}')
+        if pr['head']['sha'] != delivery['head_sha']:
+            delivery.update(state='blocked', error='Candidate head changed after validation was requested')
+            changed += 1
+            continue
+        runs = api.pages('/actions/workflows/argus-validate.yml/runs?event=workflow_dispatch&head_sha='
+                         + delivery['runtime_sha'], 'workflow_runs')
+        matches = [row for row in runs if row.get('display_title') == 'Argus validate / ' + delivery['validation_key']]
+        validation = max(matches, key=lambda row: row['id']) if matches else None
+        if validation and validation['status'] == 'completed':
+            delivery['validation'] = {'run_id': validation['id'], 'conclusion': validation['conclusion']}
+        validated = delivery.get('validation', {}).get('conclusion') == 'success'
+        if (settings.get('auto_merge', False) and validated and delivery['native_success']
+                and project.goal_revision == project.tasks[task_id]['goal_revision']
+                and project.status == 'active' and not pr['merged'] and pr['state'] == 'open'):
+            api.request('PUT', f'/pulls/{pr["number"]}/merge',
+                        {'sha': delivery['head_sha'], 'merge_method': 'squash'})
+            pr = api.request('GET', f'/pulls/{pr["number"]}')
+        if pr['merged'] or pr['state'] == 'closed':
+            delivery['state'] = 'merged' if pr['merged'] else 'rejected'
+            delivery['merge_sha'] = pr.get('merge_commit_sha')
+            task = Task.read(project.tasks[task_id])
+            task.state = 'completed' if pr['merged'] else 'blocked'
+            project.tasks[task_id] = task.json()
+            backlog = Backlog(store.root / 'runtime' / 'projects' / project.id / 'backlog.jsonl')
+            if delivery.get('native_status') == 'done' and not pr['merged']:
+                backlog.update(task.item_id, status='failed', last_error='Code candidate was rejected')
+            event = {'id': f'delivery-{task_id}-{delivery["state"]}', 'kind': 'merged' if pr['merged'] else 'review',
+                     'approved_by': 'github-delivery-reconciler',
+                     'payload': {'text': json.dumps({'delivery': delivery['state'], 'task': task_id,
+                                                     'pull_request': pr['number']})}}
+            project.accepted_requests.append(event)
+            project.continuations = {'requested': True, 'reason': 'delivery_changed'}
+            changed += 1
+    if changed:
+        metadata = api.request('GET', '/')
+        project.source_sha = commit_sha(api.request('GET', '/git/ref/heads/' + metadata['default_branch'])['object']['sha'])
+    return changed
