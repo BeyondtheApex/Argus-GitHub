@@ -1,0 +1,10 @@
+{
+  "backend": "codex",
+  "mission_width": 2,
+  "slice_seconds": 2400,
+  "event_log_verbosity": "full",
+  "global_daily_cap_usd": 0,
+  "profiles": {
+    "ubuntu": {"runs_on": ["ubuntu-latest"], "timeout_minutes": 60}
+  }
+}

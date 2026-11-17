@@ -1,0 +1,107 @@
+name: Argus worker
+run-name: 'Argus worker / ${{ inputs.task_id }} / ${{ inputs.attempt }}'
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        type: string
+        required: true
+      attempt:
+        type: string
+        required: true
+      state_commit:
+        type: string
+        required: true
+      profile:
+        type: string
+        default: ubuntu
+concurrency:
+  group: argus-worker-${{ inputs.task_id }}-${{ inputs.attempt }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      source_sha: ${{ steps.prepare.outputs.source_sha }}
+      runs_on: ${{ steps.prepare.outputs.runs_on }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+      - id: prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TASK_ID: ${{ inputs.task_id }}
+          TASK_ATTEMPT: ${{ inputs.attempt }}
+          STATE_COMMIT: ${{ inputs.state_commit }}
+        run: python -m argus.github_host prepare --task-id "$TASK_ID" --attempt "$TASK_ATTEMPT" --state-commit "$STATE_COMMIT" --output host-input
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: argus-worker-input
+          path: host-input
+          include-hidden-files: true
+          retention-days: 2
+  execute:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: runtime
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          path: project
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+        with:
+          model: 'true'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: argus-worker-input
+          path: host-input
+      - name: Execute the original Argus mission and review machinery
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python -m argus.github_host execute --bundle host-input --runtime "$RUNNER_TEMP/native" --worktree project --output host-output
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: argus-result
+          path: host-output/result.json
+          retention-days: 14
+  publish:
+    needs: execute
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: argus-result
+          path: host-output
+      - name: Validate worker provenance and merge its proposal
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m argus.github_host publish-worker --result host-output/result.json

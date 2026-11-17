@@ -1,0 +1,107 @@
+name: Argus controller
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        type: string
+        default: manual
+  workflow_run:
+    workflows: [Argus intake, Argus worker]
+    types: [completed]
+  schedule:
+    - cron: '*/15 * * * *'
+# Pending notifications can coalesce. Commands and results are durable before
+# notification; every prepare pass reconciles them without calling a model.
+concurrency:
+  group: argus-controller
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: write
+    outputs:
+      think: ${{ steps.prepare.outputs.think }}
+      source_sha: ${{ steps.prepare.outputs.source_sha }}
+      runtime_sha: ${{ steps.prepare.outputs.runtime_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+      - id: prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m argus.github_host prepare --output host-input
+      - if: steps.prepare.outputs.think == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: argus-controller-input
+          path: host-input
+          include-hidden-files: true
+          retention-days: 2
+  think:
+    needs: prepare
+    if: needs.prepare.outputs.think == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.runtime_sha }}
+          path: runtime
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          path: project
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+        with:
+          model: 'true'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: argus-controller-input
+          path: host-input
+      - name: Run one native controller slice without repository write credentials
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python -m argus.github_host execute --bundle host-input --runtime "$RUNNER_TEMP/native" --worktree project --output host-output
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: argus-controller-proposal
+          path: host-output/controller.json
+          retention-days: 7
+  publish:
+    needs: [prepare, think]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.runtime_sha }}
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: argus-controller-proposal
+          path: host-output
+      - name: Validate and persist decisions before dispatch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m argus.github_host publish-controller --result host-output/controller.json

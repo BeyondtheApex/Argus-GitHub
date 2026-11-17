@@ -1,0 +1,38 @@
+name: Argus intake
+on:
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      command:
+        type: choice
+        options: [initialize, request, answer, pause, resume, cancel, revise-goal, retry]
+        required: true
+      payload:
+        description: JSON command payload; never include credentials
+        type: string
+        default: '{}'
+permissions:
+  contents: read
+jobs:
+  intake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: write
+      issues: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+      - name: Verify actor and persist an approved command
+        working-directory: runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m argus.github_host intake
