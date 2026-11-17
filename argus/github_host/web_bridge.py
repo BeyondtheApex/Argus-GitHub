@@ -50,6 +50,32 @@ def serialize(response: Any) -> dict[str, Any]:
             'body_b64': base64.b64encode(response.content).decode(), 'generated_at': time.time()}
 
 
+def collect_history_views(client: Any, path: str) -> dict[str, Any]:
+    """Persist the native page chain, including its unchanged terminal page.
+
+    A cursor may stay unchanged while a batch of tool noise is indexed. Replace
+    that intermediate page until useful events or the end of history is reached;
+    never invent an empty response or truncate history at a page-count limit.
+    """
+    views: dict[str, Any] = {}
+    current, previous_progress = path, None
+    while True:
+        response = client.get(current)
+        views[view_key(current)] = {'path': normalize_path(current), **serialize(response)}
+        if response.status_code != 200:
+            break
+        page = response.json()
+        next_path = path + '?' + urlencode({'after': page['history_cursor'], 'task_after': page['cursor']})
+        progress = (page['history_cursor'], page.get('history_progress', {}).get('loaded_bytes'))
+        if normalize_path(next_path) == normalize_path(current):
+            if not page['history_loading']:
+                break
+            if progress == previous_progress:
+                raise ContractError('Native history pagination stopped making progress')
+        current, previous_progress = next_path, progress
+    return views
+
+
 def collect_views(root: Path, project: Project) -> dict[str, Any]:
     """Precompute ordinary UI reads; parameterized reads use the same finite RPC."""
     from fastapi.testclient import TestClient
@@ -63,7 +89,7 @@ def collect_views(root: Path, project: Project) -> dict[str, Any]:
     tails = ['/snapshot?compact=true&events_limit=1', '/status', '/journal?n=20', '/config', '/identity',
              '/transcript?n=30', '/transcript?n=120', '/snapshot?compact=false&events_limit=40',
              '/events?limit=80&view=ui', '/events?limit=120&view=ui', '/events?limit=500&view=ui', '/artifacts',
-             '/artifacts?include_reading=true', '/map', '/map-info', '/map-history', '/map-notes', '/wiki', '/learning',
+             '/artifacts?include_reading=true', '/map', '/map-info', '/map-notes', '/wiki', '/learning',
              '/advisor/config', '/advisor/consultations', '/research/method', '/cost-control']
     paths.extend('/api/projects/' + sid + tail for tail in tails)
     views = {}
@@ -77,6 +103,7 @@ def collect_views(root: Path, project: Project) -> dict[str, Any]:
                 body = canonical({'detail': f'Projection unavailable: {type(exc).__name__}'})
                 views[view_key(path)] = {'path': normalize_path(path), 'status': 503,
                     'content_type': 'application/json', 'body_b64': base64.b64encode(body).decode()}
+        views.update(collect_history_views(client, '/api/projects/' + sid + '/map-history'))
     return views
 
 
@@ -115,9 +142,18 @@ def execute_request(root: Path, project: Project, request: dict[str, Any]) -> di
 
 
 def persist_views(store: Any, views: dict[str, Any]) -> None:
-    if not isinstance(views, dict) or len(views) > 300:
+    if not isinstance(views, dict):
         raise ContractError('Invalid view projection bundle')
     index = store.read('views/index.json', {'schema': 1, 'views': {}})
+    # Cursors belong to one native history generation. Retire old pages so a
+    # browser cannot poll an obsolete, permanently empty tail after a restore.
+    histories = {value['path'] for value in views.values() if value['path'].endswith('/map-history')}
+    for key, value in list(index['views'].items()):
+        if value['path'].split('?')[0] in histories and key not in views:
+            if key != view_key(value['path']):
+                raise ContractError('Invalid persisted view index')
+            (store.root / 'views' / (key + '.json')).unlink(missing_ok=True)
+            del index['views'][key]
     for key, value in views.items():
         if key != view_key(value['path']):
             raise ContractError('View key does not match its native API path')

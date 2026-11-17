@@ -228,6 +228,18 @@ export async function hostFetch(path: string, init: RequestInit = {}): Promise<R
   const method = (init.method || 'GET').toUpperCase();
   if (method !== 'GET') return enqueue(path, init);
   const key = await hash(path);
+  const query = new URL(path, 'https://argus.invalid');
+  if (query.pathname.endsWith('/map-history') && query.searchParams.has('after')) {
+    const index = await readState<{ views: Record<string, unknown> }>('views/index.json');
+    if (!index.views[key]) {
+      // A new runner regenerates native history cursors. Restart from the
+      // current persisted first page instead of dispatching an Action per poll.
+      const first = await readState<Receipt>(`views/${await hash(query.pathname)}.json`);
+      const response = responseFrom(first);
+      if (!response.ok) return response;
+      return Response.json({ ...await response.json(), reset_history: true });
+    }
+  }
   try {
     const receipt = await readState<Receipt>(`views/${key}.json`);
     if (receipt.status < 500) return responseFrom(receipt);

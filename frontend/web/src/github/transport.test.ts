@@ -85,4 +85,16 @@ describe('GitHub transport', () => {
     await transport.refreshPending();
     expect(transport.hostPending()[0].state).toBe('completed');
   });
+
+  it('restarts stale history cursors from a real persisted page without dispatching work', async () => {
+    const { transport, fetch } = await setup();
+    fetch.mockImplementation(async (url: string) => {
+      if (url.includes('/contents/views/index.json')) return Response.json({ views: {} });
+      return Response.json({ status: 200, content_type: 'application/json',
+        body_b64: btoa(JSON.stringify({ events: [{ id: 'retained-evidence' }], history_loading: true })) });
+    });
+    const response = await transport.hostFetch('/api/projects/p/map-history?after=old%3A500&task_after=old-task');
+    expect(await response.json()).toEqual({ events: [{ id: 'retained-evidence' }], history_loading: true, reset_history: true });
+    expect(fetch.mock.calls.some(([url]) => url.includes('/dispatches'))).toBe(false);
+  });
 });
