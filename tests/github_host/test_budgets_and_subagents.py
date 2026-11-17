@@ -29,6 +29,17 @@ def test_remote_registry_does_not_use_local_process_liveness():
     assert reconcile_terminal_task('remote', row) == row
 
 
+def test_lane_exit_sidecar_is_portable_and_can_be_snapshotted(tmp_path: Path, monkeypatch):
+    from argus.github_host.snapshots import capture
+    from argus.tools.subagent._registry import _exit_status_path
+    monkeypatch.setenv('ARGUS_GITHUB_HOST', '1')
+    path = _exit_status_path('acceptance::child', 'acceptance::child-123', registry_root=tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text('0', encoding='utf-8')
+    assert ':' not in path.relative_to(tmp_path).as_posix()
+    assert len(capture(tmp_path)) == 1
+
+
 def test_native_cost_control_merges_independent_calls_and_retains_liabilities():
     base = {'version': 2, 'day': '2026-11-17', 'reservations': [], 'unresolved': [],
             'project_roots': [], 'acknowledgements': {}, 'updated_at': 1}

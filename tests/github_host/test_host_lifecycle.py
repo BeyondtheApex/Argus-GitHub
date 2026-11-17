@@ -82,6 +82,7 @@ def test_remote_outcome_reenters_native_controller_policy(tmp_path: Path, monkey
     state = project()
     state.feedback = [{'id': 'result-1', 'consumed': False, 'outcome': {
         'status': 'done', 'success': True, 'item_id': 'work-1',
+        'context_packet': '@ARGUS_STATE@/projects/report.md',
         'planner_report': {'forward_progress': False}}}]
     code = tmp_path / 'code'
     code.mkdir()
@@ -93,6 +94,7 @@ def test_remote_outcome_reenters_native_controller_policy(tmp_path: Path, monkey
         supervisor.config.post_mission_hook = lambda result: 'test_after_policy'
         outcome = supervisor.run()
         assert observed[0]['item_id'] == 'work-1'
+        assert observed[0]['context_packet'] == str(tmp_path / 'runtime') + '/projects/report.md'
         assert supervisor._host_consumed_feedback == ['result-1']
         assert supervisor._consecutive_no_progress_missions == 2
         assert outcome['stopped_by'] == 'test_after_policy'

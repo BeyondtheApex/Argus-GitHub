@@ -316,7 +316,10 @@ def build_runtime(project: Project, state_root: Path, worktree: Path,
         worker_item=worker_item)
     restore_supervisor(supervisor, memory.project_root / 'repository-supervisor.json')
     if not worker_item:
-        supervisor._host_feedback = [row for row in project.feedback if not row.get('consumed')]
+        from .portability import rebase
+        feedback = [row for row in project.feedback if not row.get('consumed')]
+        supervisor._host_feedback = json.loads(rebase({'feedback.json': canonical(feedback)},
+            state_root, worktree, portable=False)['feedback.json'])
     if worker_item:
         item = next((item for item in memory.backlog.active() if item.id == worker_item), None)
         if item is None or item.status != 'running':

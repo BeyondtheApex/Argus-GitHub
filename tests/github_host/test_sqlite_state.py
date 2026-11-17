@@ -8,6 +8,29 @@ from argus.github_host.snapshots import capture, make_delta, merge_delta, restor
 from argus.github_host.sqlite_state import materialize
 
 
+def test_path_keys_rebase_without_becoming_duplicate_rows(tmp_path: Path):
+    from argus.github_host.portability import rebase
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    first.mkdir()
+    with closing(sqlite3.connect(first / 'paths.db')) as db:
+        db.execute('CREATE TABLE paths(path TEXT PRIMARY KEY, body TEXT)')
+        db.execute('INSERT INTO paths VALUES (?,?)', (str(first / 'notes'), 'before'))
+        db.commit()
+    initial = rebase(capture(first), first, tmp_path / 'source', portable=True)
+    restore(second, rebase(initial, second, tmp_path / 'source-2', portable=False))
+    materialize(second)
+    with closing(sqlite3.connect(second / 'paths.db')) as db:
+        db.execute('UPDATE paths SET body=? WHERE path=?', ('after', str(second / 'notes')))
+        db.commit()
+    changed = rebase(capture(second), second, tmp_path / 'source-2', portable=True)
+    import json
+    before_rows = json.loads(initial['paths.db'])['tables']['paths']['rows']
+    after_rows = json.loads(changed['paths.db'])['tables']['paths']['rows']
+    assert before_rows.keys() == after_rows.keys()
+    assert len(after_rows) == 1
+    assert next(iter(after_rows.values()))['values']['body'] == 'after'
+
+
 def test_sqlite_wal_blob_and_disjoint_rows_survive_parallel_snapshots(tmp_path: Path):
     base = tmp_path / 'base'
     base.mkdir()

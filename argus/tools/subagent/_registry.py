@@ -114,7 +114,8 @@ def _exit_status_path(
     *,
     registry_root: Path | str | None = None,
 ) -> Path:
-    name = f"exit_code.{run_id}" if run_id else "exit_code"
+    component = _task_file_component(run_id) if run_id and os.environ.get('ARGUS_GITHUB_HOST') else run_id
+    name = f"exit_code.{component}" if component else "exit_code"
     return _registry_root(registry_root) / f"{_task_file_component(task_id)}_logs" / name
 
 

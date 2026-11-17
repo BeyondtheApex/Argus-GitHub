@@ -233,8 +233,10 @@ def execute(args: argparse.Namespace) -> None:
     from .web_bridge import collect_views
     views = collect_views(state_root, project)
     after = rebase(capture(state_root), state_root, source, portable=True)
+    native = json.loads(rebase({'native.json': canonical(native)}, state_root, source, portable=True)['native.json'])
     from .security import scan_payload
     scan_payload(after, os.environ)
+    scan_payload({'native.json': canonical(native)}, os.environ)
     scan_payload({key: base64.b64decode(row['body_b64']) for key, row in views.items()}, os.environ)
     delta = make_delta(before, after)
     metrics = {'execution_seconds': time.monotonic() - started,

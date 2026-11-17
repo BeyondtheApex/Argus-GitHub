@@ -47,8 +47,8 @@ def execute_learning(root: Path, task: Task) -> dict[str, Any]:
         if row is None:
             raise ValueError('Authorized learning job disappeared')
         job = dict(row)
-        if job['status'] == 'done':
-            return {'status': 'learning_done', 'success': True, 'item_id': job_id}
+        if job['status'] in {'completed', 'unchanged'}:
+            return {'status': 'learning_' + job['status'], 'success': True, 'item_id': job_id}
         db.execute("UPDATE jobs SET status='running', updated=?, attempts=attempts+1 WHERE id=?", (time.time(), job_id))
     native._BACKEND_FACTORIES[root] = answer_learning_backend
     try:

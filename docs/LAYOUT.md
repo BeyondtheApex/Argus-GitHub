@@ -54,7 +54,7 @@ typing-only under `if TYPE_CHECKING:`) are tolerated only while their
 | roles | `roles`, `planner`, `engineer`, `reviewer` | kernel through roles; `engineer` and `reviewer` never import `verticals` (existing test) |
 | runtime | `life`, `manager`, `messaging` | kernel through runtime; the intra-layer cycle `life` <-> `manager` is tolerated (not measured by the tests) |
 | process | `daemon`, `team` | kernel through process; the intra-layer cycle `daemon` <-> `team` is tolerated (not measured by the tests) |
-| delivery | `apps`, `webapi`, `plugin`, `maintenance`, `trial`, `integrations`, `release_tools` | everything |
+| delivery | `apps`, `webapi`, `plugin`, `maintenance`, `trial`, `integrations`, `release_tools`, `github_host` | everything |
 
 Notes on the table:
 
@@ -74,6 +74,8 @@ Notes on the table:
   at a time.
 
 ## Packages
+
+- `argus/github_host/` (delivery) - GitHub deployment adapter: durable controller/worker transport, repository snapshots, native continuation, Pages projections and checked runtime upgrades. Native decision logic remains in its original packages.
 
 One line per package, verified against the modules' docstrings on 2026-09-14. Where a
 package name no longer describes its contents, the line says so and names the phase
@@ -111,6 +113,8 @@ that fixes it.
 - Package-root modules (delivery): `argus/__init__.py` (public API, lazy via PEP 562 from phase 0), `__main__.py` (`python -m argus`; re-exports `apps.cli.main` and is the target of the pre-rename `argus-skill` console script, kept one release), `loop.py` (`SkillLoop`; moves to `mission_runner/` in phase 5), `desktop_backend_entry.py` (PyInstaller entry for the frozen desktop backend).
 
 ## Repository top level
+
+- `.argus-host/` - repository deployment settings, immutable upstream reference and checked private integration seams.
 
 The tracked top-level directories are listed below. `technical_report/` is
 private-mirror only, see `PRIVATE_ONLY_PATTERNS` in

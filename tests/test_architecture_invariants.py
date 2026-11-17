@@ -1011,7 +1011,7 @@ LAYERS: dict[str, tuple[str, ...]] = {
     "runtime": ("life", "manager", "messaging"),
     "process": ("daemon", "team"),
     "delivery": (
-        "apps", "webapi", "plugin", "maintenance", "trial", "integrations", "release_tools",
+        "apps", "webapi", "plugin", "maintenance", "trial", "integrations", "release_tools", "github_host",
     ),
 }
 LAYER_ORDER = tuple(LAYERS)
@@ -1147,6 +1147,10 @@ MODULE_LEVEL_UPWARD_ALLOWLIST: frozenset[str] = frozenset({
 # knows a high layer's name. ``<root>`` is the package root (``import
 # argus`` for its path, or ``from .. import __version__``).
 FUNCTION_BODY_UPWARD_ALLOWLIST: frozenset[str] = frozenset({
+    # Optional repository deployment hooks; native local execution is unchanged.
+    "life/answer_learning.py -> github_host",
+    "tools/subagent/_cli.py -> github_host",
+    "tools/subagent/_discuss_run.py -> github_host",
     "adapters/agent_cli_backend/_core.py -> tools",
     "adapters/agent_cli_backend/_exec.py -> life",
     "adapters/agent_cli_backend/_exec.py -> messaging",
@@ -1236,6 +1240,16 @@ FUNCTION_BODY_UPWARD_ALLOWLIST: frozenset[str] = frozenset({
 # is expected to delete the ``verticals._base`` / ``_registry`` /
 # ``_data_domain`` rows wholesale.
 PRIVATE_IMPORT_ALLOWLIST: frozenset[str] = frozenset({
+    # Repository adapter seams are additionally pinned in .argus-host/compatibility.json.
+    "github_host -> argus.apps._inbox_protocol",
+    "github_host -> argus.apps._runtime",
+    "github_host -> argus.apps._runtime_construction",
+    "github_host -> argus.daemon._life_worker_runtime_context",
+    "github_host -> argus.life.supervisor._core",
+    "github_host -> argus.tools.subagent._cli",
+    "github_host -> argus.tools.subagent._discuss_run",
+    "github_host -> argus.tools.subagent._discussion_log",
+    "github_host -> argus.tools.subagent._registry",
     "<root> -> argus.apps.tui_launcher._configure_windows_console_encoding",
     "<root> -> argus.verticals._base",
     "adapters -> argus.agent_cli._env",
