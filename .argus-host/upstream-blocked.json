@@ -1,0 +1,1 @@
+{"reason":"workflow_write_permission_required","source_sha":"654a413f0248e312a6bfe9d214fc272c15cee206","upstream_sha":"b8dfd83bfa04f24d63d45729f0b5948b661d0a73","workflow_paths":[".github/workflows/desktop-cache.yml",".github/workflows/desktop-trial.yml",".github/workflows/extended.yml",".github/workflows/release.yml"]}
