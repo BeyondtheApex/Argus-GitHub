@@ -1,7 +1,7 @@
 /** GitHub is the transport and durable store. Credentials remain in memory. */
 export const githubMode = import.meta.env.VITE_ARGUS_HOST === 'github';
 type Receipt = { status: number; content_type: string; body_b64: string; path?: string };
-export type Connection = { repository: string; branch: string; defaultBranch: string; login: string; canWrite: boolean };
+export type Connection = { repository: string; branch: string; defaultBranch: string; login: string; canWrite: boolean; isPublic: boolean };
 export type Pending = { id: string; path: string; state: 'accepted' | 'waiting' | 'completed' | 'failed'; started: number; kind?: 'api' | 'command'; runId?: number; url?: string; error?: string };
 let connection: Connection | undefined;
 let credential = '';
@@ -48,7 +48,7 @@ export async function connect(repository: string, token: string): Promise<Connec
     const repo = await (await github(`/repos/${repository}`)).json();
     const user = credential ? await (await github('/user')).json() : { login: 'public reader' };
     connection = { repository, branch: 'argus-state', defaultBranch: repo.default_branch,
-      login: user.login, canWrite: Boolean(repo.permissions?.push) };
+      login: user.login, canWrite: Boolean(repo.permissions?.push), isPublic: repo.private === false };
     cache.clear();
     try {
       const saved: Pending[] = JSON.parse(sessionStorage.getItem('argus-pending:' + repository) || '[]');
@@ -69,9 +69,14 @@ export async function readState<T>(path: string, fresh = false): Promise<T> {
   const key = host.repository + ':' + path;
   const previous = cache.get(key);
   if (!fresh && previous && Date.now() - previous.at < 10_000) return previous.value as T;
-  const response = await github(`/repos/${host.repository}/contents/${path}?ref=${host.branch}`, {
+  // Anonymous dashboards must not spend the small REST API quota on every
+  // projection poll. Public raw files contain exactly the same Git state.
+  const response = !credential && host.isPublic
+    ? await fetch(`https://raw.githubusercontent.com/${host.repository}/refs/heads/${host.branch}/${path}`)
+    : await github(`/repos/${host.repository}/contents/${path}?ref=${host.branch}`, {
     headers: { Accept: 'application/vnd.github.raw+json', ...(previous?.etag ? { 'If-None-Match': previous.etag } : {}) },
   });
+  if (!response.ok && response.status !== 304) throw new Error(`GitHub ${response.status}: State read failed`);
   if (response.status === 304 && previous) { previous.at = Date.now(); return previous.value as T; }
   const value = await response.json();
   // Some GitHub media negotiations return a Contents object.
