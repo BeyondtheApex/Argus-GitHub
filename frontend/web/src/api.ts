@@ -30,6 +30,7 @@ import {
   type ApiMeta,
 } from '../../core/src/protocol';
 import type { ResourceStatus } from '../../core/src/resourceStatus.generated';
+import { githubMode, hostFetch, hostStream } from './github/transport';
 
 export type {
   ArtifactInfo,
@@ -471,6 +472,7 @@ let inMemoryToken: string | null = null;
  * unauthenticated. Clearing the query afterwards keeps the credential out of
  * the address bar, screenshots, and the back/forward history entry. */
 export function adoptTokenFromUrl(): void {
+  if (githubMode) return;
   let params: URLSearchParams;
   try {
     params = new URLSearchParams(window.location.search);
@@ -500,6 +502,7 @@ export function adoptTokenFromUrl(): void {
 }
 
 const token = (): string | null => {
+  if (githubMode) return null;
   if (inMemoryToken) return inMemoryToken;
   try {
     return new URLSearchParams(window.location.search).get('token') ||
@@ -557,7 +560,7 @@ export function isConnectionError(error: unknown): boolean {
 async function fetchArgus(path: string, init: RequestInit): Promise<Response> {
   let response: Response;
   try {
-    response = await fetch(path, init);
+    response = await hostFetch(path, init);
   } catch (error) {
     // React Query cancellation is normal lifecycle control, not a backend
     // outage. Preserve it so unmount/navigation cannot raise a false alarm.
@@ -579,6 +582,7 @@ export async function requestWithTimeout<T>(
   timeoutMs: number,
   consume: (response: Response) => Promise<T> | T,
 ): Promise<T> {
+  if (githubMode) return consume(await hostFetch(path, init));
   const controller = new AbortController();
   const parentSignal = init.signal ?? undefined;
   let timedOut = false;
@@ -656,7 +660,7 @@ async function postResponse(
   signal?: AbortSignal,
 ): Promise<Response> {
   requireCurrentPage();
-  const r = await fetch(path, {
+  const r = await hostFetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -681,7 +685,7 @@ async function postMultipart<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   requireCurrentPage();
-  const r = await fetch(path, {
+  const r = await hostFetch(path, {
     method: 'POST',
     headers: authHeaders(),
     body,
@@ -709,7 +713,7 @@ async function mutationJson<T>(
   body?: unknown,
 ): Promise<T> {
   requireCurrentPage();
-  const r = await fetch(path, {
+  const r = await hostFetch(path, {
     method,
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -720,7 +724,7 @@ async function mutationJson<T>(
 }
 
 async function getBlob(path: string, signal?: AbortSignal): Promise<Blob> {
-  const r = await fetch(path, { headers: authHeaders(), signal });
+  const r = await hostFetch(path, { headers: authHeaders(), signal });
   await ensureResponseOk(r, 'GET', path);
   return r.blob();
 }
@@ -987,7 +991,7 @@ export const api = {
       command_id: commandId(),
       expected_revision: expectedRevision,
     };
-    const send = () => fetch(path, {
+    const send = () => hostFetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(body),
@@ -1077,7 +1081,8 @@ export const api = {
   },
   artifactPreview: (sid: string, path: string, signal?: AbortSignal) =>
     getJson<{ html: string; warnings: string[]; file_count: number; served_page?: boolean }>(
-      P(sid, `/artifact/preview?${new URLSearchParams({ path })}`), signal),
+      P(sid, `/artifact/preview?${new URLSearchParams({ path })}`), signal)
+      .then(value => githubMode ? { ...value, served_page: false } : value),
   artifactBundle: (sid: string, path: string, signal?: AbortSignal) =>
     getBlob(P(sid, `/artifact/bundle?${new URLSearchParams({ path })}`), signal),
   artifactBlob: (
@@ -1391,6 +1396,7 @@ export function openStream(
     onClose?: (info: StreamCloseInfo) => void;
   } = {},
 ): () => void {
+  if (githubMode) return hostStream<EventMsg>(sid, onEvent, opts.onOpen);
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const q = new URLSearchParams();
   if (opts.replay != null) q.set('replay', String(opts.replay));

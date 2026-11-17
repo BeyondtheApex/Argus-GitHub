@@ -136,12 +136,12 @@ def merge_delta(base: dict[str, bytes], current: dict[str, bytes],
             value = proposed
         elif proposed == original:
             value = live
-        elif original is not None and live is not None and proposed is not None:
+        elif live is not None and proposed is not None and (original is not None or name.endswith(('.json', '.jsonl'))):
             try:
                 if name.endswith('.json'):
-                    value = canonical(_merge_json(json.loads(original), json.loads(live), json.loads(proposed))) + b'\n'
+                    value = canonical(_merge_json(json.loads(original or b'{}'), json.loads(live), json.loads(proposed))) + b'\n'
                 elif name.endswith('.jsonl'):
-                    value = _merge_jsonl(original, live, proposed)
+                    value = _merge_jsonl(original or b'', live, proposed)
                 else:
                     raise ContractError(f'Concurrent edits conflict: {name}')
             except (json.JSONDecodeError, UnicodeError) as exc:

@@ -15,6 +15,9 @@ on:
       profile:
         type: string
         default: ubuntu
+      state_branch:
+        type: string
+        default: argus-state
 concurrency:
   group: argus-worker-${{ inputs.task_id }}-${{ inputs.attempt }}
   cancel-in-progress: false
@@ -44,7 +47,8 @@ jobs:
           TASK_ID: ${{ inputs.task_id }}
           TASK_ATTEMPT: ${{ inputs.attempt }}
           STATE_COMMIT: ${{ inputs.state_commit }}
-        run: python -m argus.github_host prepare --task-id "$TASK_ID" --attempt "$TASK_ATTEMPT" --state-commit "$STATE_COMMIT" --output host-input
+          STATE_BRANCH: ${{ inputs.state_branch }}
+        run: python -m argus.github_host prepare --branch "$STATE_BRANCH" --task-id "$TASK_ID" --attempt "$TASK_ATTEMPT" --state-commit "$STATE_COMMIT" --output host-input
       - if: steps.prepare.outputs.execute == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -110,4 +114,5 @@ jobs:
       - name: Validate worker provenance and merge its proposal
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python -m argus.github_host publish-worker --result host-output/result.json
+          STATE_BRANCH: ${{ inputs.state_branch }}
+        run: python -m argus.github_host publish-worker --branch "$STATE_BRANCH" --result host-output/result.json

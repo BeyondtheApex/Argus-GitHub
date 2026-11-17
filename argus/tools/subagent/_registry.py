@@ -149,6 +149,7 @@ def _child_env() -> dict[str, str]:
     ``ARGUS_SUBAGENT_QUIET_LOGS=0`` to keep the inherited verbosity untouched.
     """
     env = os.environ.copy()
+    env.pop('ARGUS_GITHUB_REMOTE_EXECUTE', None)
     # stdout is a file here, not a tty, so CPython block-buffers it and a long
     # experiment's progress stays invisible until 8KB accumulates or it exits.
     # One campaign held four GPUs for five hours behind a 0-byte stdout.log:
@@ -526,6 +527,8 @@ def reconcile_terminal_task(
     registry_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """Recover a terminal direct/supervised job after its worker owner died."""
+    if task.get('transport') == 'github-actions':
+        return task  # GitHub run reconciliation owns remote liveness, never this host's PIDs
     if task.get("state") not in {"starting", "preflight", "waiting_resource", "running"}:
         return task
     if int(task.get("worker_pid") or 0) and _recorded_process_alive(task, "worker_pid"):

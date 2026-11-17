@@ -21,7 +21,8 @@ def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings:
         return None
     if len(patch) > int(settings.get('max_patch_bytes', 32 * 1024 * 1024)):
         raise ContractError('Candidate exceeds the configured patch size limit')
-    branch = f'argus/task/{task.id}-{task.attempt}'
+    workspace_id = task.evidence.get('parent_item_id') or task.item_id
+    branch = f'argus/work/{workspace_id}'
     with GitStore(api.repository, token=api._token, branch=branch) as candidate:
         candidate.load(revision=task.source_sha)
         candidate.git('apply', '--cached', '--binary', '--whitespace=nowarn', '-', data=patch)
@@ -45,14 +46,20 @@ def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings:
         revision = candidate.git('rev-parse', 'HEAD').stdout.decode().strip()
         existing = candidate.git('ls-remote', 'origin', 'refs/heads/' + branch).stdout.decode().split()
         if existing:
-            revision = commit_sha(existing[0])
-            candidate.git('fetch', '-q', '--depth=1', 'origin', revision)
-            expected_tree = candidate.git('rev-parse', 'HEAD^{tree}').stdout
-            actual_tree = candidate.git('rev-parse', revision + '^{tree}').stdout
-            if expected_tree != actual_tree:
-                raise ContractError('Existing delivery branch differs from the authorized patch')
+            previous = commit_sha(existing[0])
+            candidate.git('fetch', '-q', '--depth=1', 'origin', previous)
+            if previous == task.source_sha:
+                candidate.git('push', 'origin', f'HEAD:refs/heads/{branch}')
+            else:
+                expected_tree = candidate.git('rev-parse', 'HEAD^{tree}').stdout
+                actual_tree = candidate.git('rev-parse', previous + '^{tree}').stdout
+                if expected_tree != actual_tree:
+                    raise ContractError('Concurrent workspace candidate requires code reconciliation')
+                revision = previous
         else:
             candidate.git('push', 'origin', f'HEAD:refs/heads/{branch}')
+    if task.role == 'subagent' or not result['outcome'].get('success'):
+        return {'state': 'checkpoint', 'head_sha': revision, 'workspace_id': workspace_id, 'branch': branch}
     owner = api.repository.split('/')[0]
     prs = api.request('GET', f'/pulls?state=all&head={owner}:{branch}')
     if prs:
@@ -70,6 +77,7 @@ def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings:
             'draft': not bool(result.get('outcome', {}).get('success'))})
     validation_key = f'{task.id}-{task.attempt}-{revision[:12]}'
     return {'task_id': task.id, 'attempt': task.attempt, 'state': 'awaiting_review',
+            'workspace_id': workspace_id,
             'pr': pr['number'], 'url': pr['html_url'], 'head_sha': revision,
             'source_sha': task.source_sha, 'runtime_sha': task.runtime_sha,
             'validation_key': validation_key, 'validation_pending': True,
@@ -114,6 +122,8 @@ def reconcile_deliveries(store: GitStore, project: Project, api: GitHub, setting
         if pr['merged'] or pr['state'] == 'closed':
             delivery['state'] = 'merged' if pr['merged'] else 'rejected'
             delivery['merge_sha'] = pr.get('merge_commit_sha')
+            if pr['merged']:
+                project.workspaces.pop(delivery.get('workspace_id', project.tasks[task_id]['item_id']), None)
             task = Task.read(project.tasks[task_id])
             task.state = 'completed' if pr['merged'] else 'blocked'
             project.tasks[task_id] = task.json()

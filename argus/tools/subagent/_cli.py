@@ -948,6 +948,9 @@ def main() -> int:
                               "use for rationales with quotes/newlines")
 
     args = parser.parse_args()
+    if os.environ.get('ARGUS_GITHUB_HOST') == '1' and os.environ.get('ARGUS_GITHUB_REMOTE_EXECUTE') != '1':
+        from ...github_host.subagents import transport
+        return transport(args)
     handlers = {
         "submit": cmd_submit,
         "_worker": cmd_worker,

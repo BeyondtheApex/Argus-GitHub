@@ -12,6 +12,8 @@ import '@fontsource-variable/geist';
 import '@fontsource-variable/geist-mono';
 import 'katex/dist/katex.min.css';
 import './index.css';
+import { githubMode } from './github/transport';
+import GitHubGate from './github/GitHubGate';
 
 const isAdminData = window.location.pathname === '/admin/data' || window.location.pathname.startsWith('/admin/data/');
 const App = lazy(() => import('./App'));
@@ -55,7 +57,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <I18nProvider>
-        <WebApp />
+        {githubMode ? <GitHubGate><WebApp /></GitHubGate> : <WebApp />}
       </I18nProvider>
     </QueryClientProvider>
   </React.StrictMode>,

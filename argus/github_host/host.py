@@ -57,6 +57,10 @@ def _accept_command(project: Project, command: dict[str, Any]) -> bool:
     elif kind in {'request', 'answer', 'review', 'merged', 'source_changed'}:
         project.accepted_requests.append(command)
         project.continuations = {'requested': True, 'reason': kind}
+    elif kind == 'api':
+        from .web_bridge import normalize_path
+        normalize_path(payload['path'])
+        identifier(payload['request_id'])
     elif kind == 'retry':
         task = Task.read(project.tasks[identifier(payload['task_id'])])
         if task.state not in {'failed', 'blocked'}:
@@ -78,7 +82,35 @@ def ingest_commands(store: GitStore, project: Project) -> list[str]:
         command = json.loads(path.read_text(encoding='utf-8'))
         if command['id'] in project.processed_events:
             continue
+        request = command.get('payload', {}) if command['kind'] == 'api' else None
+        control = None
+        if request and request.get('method') == 'POST':
+            path = request.get('path', '')
+            prefix = '/api/projects/' + project.id
+            if path == prefix + '/daemon/start':
+                control = 'resume'
+            elif path == prefix + '/daemon/stop':
+                control = 'pause'
+            elif path == prefix + '/continuous':
+                body = request.get('body') or {}
+                control = ('revise-goal' if body.get('objective') else 'resume') if body.get('enabled') else 'pause'
+            if control:
+                command = {**command, 'kind': control, 'payload': request.get('body') or {}}
         accept_command(project, command)
+        if control:
+            import base64
+
+            from .protocol import canonical
+            store.write('api/' + identifier(request['request_id']) + '.json', {
+                'status': 200, 'content_type': 'application/json',
+                'body_b64': base64.b64encode(canonical({'ok': True, 'sid': project.id, 'rc': 0,
+                    'command_status': 'applied', 'status': project.status})).decode()})
+        if command['kind'] == 'api':
+            request = command['payload']
+            task_id = 'api-' + digest(request)[:24]
+            task = Task(task_id, task_id, project.goal_revision, project.runtime_sha,
+                        project.source_sha, store.base, role='api', evidence={'request': request})
+            project.queue(task)
         consumed.append(command['id'])
         destination = store.root / 'receipts' / path.name
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -104,7 +136,8 @@ def publish_controller(store: GitStore, proposal: dict[str, Any], *, settings: d
     # Materialize the exact native state (including newly planned items) before
     # creating task references. Both commits are sent in a single Git push.
     snapshot = store.commit_local('Checkpoint native Argus controller state')
-    active = [Task.read(row) for row in project.tasks.values() if row['state'] in ACTIVE]
+    active = [Task.read(row) for row in project.tasks.values() if row['state'] in ACTIVE
+              and row['role'] not in {'api', 'subagent'}]
     width = int(settings.get('mission_width', 2))
     available = max(0, width - len(active))
     candidates = proposal.get('dispatches', [])
@@ -117,11 +150,17 @@ def publish_controller(store: GitStore, proposal: dict[str, Any], *, settings: d
         task_id = 't-' + digest({'project': project.id, 'goal': project.goal_revision,
                                  'item': item_id, 'snapshot': snapshot})[:24]
         task = Task(task_id, item_id, project.goal_revision, project.runtime_sha,
-                    project.source_sha, snapshot,
+                    project.workspaces.get(item_id, project.source_sha), snapshot,
                     owns_paths=list(row.get('owns_paths') or []),
                     parallel_safe=bool(row.get('parallel_safe', False)))
         project.queue(task)
+    from .subagents import queue_remote_requests
+    queue_remote_requests(store, project, parent=None, requests=proposal.get('subagent_requests', []))
     project.accept_event(event_id, {'digest': digest(proposal)})
+    from .budgets import settle
+    settle(project, proposal['id'], proposal.get('metrics', {}))
+    from .web_bridge import persist_views
+    persist_views(store, proposal.get('views', {}))
     stopped = proposal.get('native_outcome', {}).get('stopped_by', '')
     if stopped == 'project_done' and not project.open_ended and not active and not candidates:
         project.status = 'completed'
@@ -130,7 +169,7 @@ def publish_controller(store: GitStore, proposal: dict[str, Any], *, settings: d
     # are scheduled; settled waits require an actual event or an explicit due time.
     wait = stopped in {'await_external', 'awaiting_external', 'terminal_idle', 'paused_operator',
                        'operator_decision_required', 'paused_provider_fence',
-                       'paused_budget', 'paused_cost', 'auth_failure'}
+                       'paused_budget', 'paused_cost', 'auth_failure', 'host_error'}
     if stopped == 'manager_config_pending' and active and not has_work:
         wait = True
     for feedback in project.feedback:
@@ -173,24 +212,42 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
     task.run_id = result['run_id']
     task.result_digest = digest(result)
     task.finished_at = time.time()
+    from .budgets import settle
+    settle(project, f'{task.id}.{task.attempt}', result.get('metrics', {}))
     # A successful Action means an execution report exists. Native outcome and
     # later PR/research acceptance still decide what has actually been achieved.
     task.state = 'completed' if outcome.get('success') else 'failed'
     task.evidence = {'native_outcome': outcome, 'run_id': task.run_id,
-                     'source_sha': task.source_sha, 'changes': result.get('changes', {})}
+                     'source_sha': task.source_sha, 'has_code_changes': bool(result.get('changes', {}).get('patch_b64')),
+                     **task.evidence}
     project.tasks[task.id] = task.json()
     if api is not None and result.get('changes', {}).get('patch_b64'):
         from .delivery import hold_backlog, publish_candidate
         delivery = publish_candidate(api, task, result, store.read(SETTINGS_PATH, {}))
         if delivery:
-            hold_backlog(store, project, task, delivery)
-            project.deliveries[task.id] = delivery
-            task.state = 'awaiting_review'
-            project.tasks[task.id] = task.json()
-    if result.get('execution_completed'):
+            project.workspaces[delivery['workspace_id']] = delivery['head_sha']
+            if delivery['state'] != 'checkpoint':
+                hold_backlog(store, project, task, delivery)
+                project.deliveries[task.id] = delivery
+                task.state = 'awaiting_review'
+                project.tasks[task.id] = task.json()
+    from .subagents import queue_remote_requests
+    queue_remote_requests(store, project, parent=task, requests=result.get('subagent_requests', []))
+    from .web_bridge import persist_views, view_key
+    persist_views(store, result.get('views', {}))
+    if task.role == 'api':
+        receipt = result.get('api_receipt')
+        request = task.evidence['request']
+        if not isinstance(receipt, dict) or receipt.get('path') != request['path']:
+            raise ContractError('API receipt does not match its requested endpoint')
+        store.write('api/' + identifier(request['request_id']) + '.json', receipt)
+        if request.get('method', 'GET') == 'GET':
+            persist_views(store, {view_key(receipt['path']): receipt})
+    if result.get('execution_completed') and task.role not in {'api', 'subagent'}:
         project.feedback.append({'id': f'{task.id}.{task.attempt}', 'consumed': False,
                                  'outcome': outcome, 'task_id': task.id})
-    project.continuations = {'requested': project.status == 'active', 'reason': 'worker_result'}
+    if task.role != 'api' or task.evidence['request'].get('method', 'GET') != 'GET':
+        project.continuations = {'requested': project.status == 'active', 'reason': 'worker_result'}
     store.write(PROJECT_PATH, project.json())
     return 'accepted'
 
@@ -215,7 +272,14 @@ def flush_dispatches(store: GitStore, api: GitHub, *, lease_seconds: int = 21600
         if task.goal_revision != project.goal_revision or task.state in {'cancelled', 'superseded'}:
             operation['status'] = 'cancelled'
             continue
-        run_id = api.dispatch(task)
+        from .budgets import known_spend, reserve
+        settings = store.read(SETTINGS_PATH, {})
+        grant = reserve(project, key, settings, spent=known_spend(store.root / 'runtime'))
+        if grant is None:
+            continue
+        store.write(PROJECT_PATH, project.json())
+        store.publish('Reserve task capacity before dispatch side effect')
+        run_id = api.dispatch(task, state_branch=store.branch)
         task.run_id = run_id
         task.state = 'dispatched'
         task.dispatched_at = time.time()
@@ -242,7 +306,9 @@ def reconcile_runs(project: Project, api: GitHub, *, max_attempts: int = 3) -> l
                 task.last_error = 'Dispatch acknowledgement missing; explicit reconciliation required'
         elif run['status'] == 'completed':
             task.run_id = run['id']
-            if run['conclusion'] == 'success':
+            jobs = api.pages(f'/actions/runs/{run["id"]}/jobs', 'jobs')
+            has_result = any(row.get('name') == 'execute' and row.get('conclusion') == 'success' for row in jobs)
+            if run['conclusion'] == 'success' or has_result:
                 completed.append(run['id'])
             else:
                 task.last_error = f"GitHub execution ended: {run['conclusion']}"
@@ -289,6 +355,17 @@ def recover_failed_runs(store: GitStore, project: Project) -> int:
             continue
         if task['state'] == 'blocked':
             continue  # ambiguity/conflicts need evidence, not another blind attempt
+        if task['role'] != 'mission':
+            task['evidence']['recovered'] = True
+            if task['role'] == 'api':
+                import base64
+
+                from .protocol import canonical
+                request = task['evidence']['request']
+                store.write('api/' + identifier(request['request_id']) + '.json', {
+                    'path': request['path'], 'status': 503, 'content_type': 'application/json',
+                    'body_b64': base64.b64encode(canonical({'detail': task['last_error'], 'task_id': task['id']})).decode()})
+            continue
         restore_failed_item(store.root / 'runtime', project, task['id'])
         task['evidence']['recovered'] = True
         recovered += 1

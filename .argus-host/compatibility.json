@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "seams": {
+    "argus/life/supervisor/_core.py:LifeSupervisor.__init__": "d3db4e6114f826480f059fa72b13d31e4c81932f4a304ccea68eaf5ec4d88670",
+    "argus/life/supervisor/_core.py:LifeSupervisor.tick": "e2370056fe8d08cf25e640532af6732faf95e58520d4d04c609aff55bd1e6b53",
+    "argus/life/supervisor/_core.py:LifeSupervisor._run_with_inbox": "e76136a8d454b09c14523b29807bb17b5888c800524c81198fa269e691bead06",
+    "argus/life/supervisor/_mission_execution.py:MissionExecutionMixin._run_one": "52f9ed89fd5f11572168535b83d69b3d27d6b79c2302b6e3725fc2d4cbfcb8e6",
+    "argus/daemon/_life_worker_runtime_context.py:_runner_namespace": "59f2a16a167ac009fdbeb69d0cfd6b216bd852abf0ac246f742087685b9b7f88",
+    "argus/daemon/_life_worker_runtime_context.py:_build_supervisor_config": "3013c7473a119f8f19ea6c31227a01ac01b25a3004203fb0d56cad76f80c901b",
+    "argus/apps/_runtime_construction.py:build_life_runner": "240ad66bc48133e7cbd07ac58486075097f6bb847f7eeba6700249c93de23531",
+    "argus/life/memory.py:Backlog.claim_next": "963bab466c394bd71162a472315dd5472eae2b3624f72774aacc259d2808a6f8",
+    "argus/life/memory.py:Backlog.next_pending": "22883600faa3f62819c6734935a35f5d43f0316024abe6124cae9d19d72ff2c0",
+    "argus/life/memory.py:Backlog._is_ready": "17341630c259d07c93f54a46c6e9b034720005c13c7d462e5e1959168d05a854",
+    "argus/life/memory.py:Backlog._done_ids": "38ff92d4ec18bb16e6e720529ba5e2771a7b165cbcf6c5ad72df5849dc902dbe",
+    "argus/tools/subagent/_cli.py:cmd_submit": "c4201d3e02e87aa284c21c416f0e9c29ed6722cdce8b6fc527f1256484768b52",
+    "argus/tools/subagent/_cli.py:main": "555d2eea17a5dfd9b810cf6b35e5cdce1e05241e1041f9e6d4072017a8feb200",
+    "argus/tools/subagent/_registry.py:reconcile_terminal_task": "f582af849714edbf043cfed11855f59a9c1a86a1bb7dfdade25696cf28387ad1",
+    "argus/tools/subagent/_discuss_run.py:_run_discussion": "86518a660fe5759ce2de01cd3c252b6da39443db16c3202eaec457340397543c"
+  }
+}

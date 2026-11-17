@@ -21,6 +21,7 @@ jobs:
       - working-directory: runtime
         run: |
           python -m ruff check argus/github_host tests/github_host
+          python -m argus.github_host.compatibility
           python -m pytest tests/github_host tests/life/test_supervisor.py tests/life/test_terminal_idle_token_efficiency.py tests/life/test_backend_failure_circuit.py tests/life/test_subagent_family_failures.py tests/life/test_supervisor_project_state_root.py -q -n 4
   web:
     runs-on: ubuntu-latest

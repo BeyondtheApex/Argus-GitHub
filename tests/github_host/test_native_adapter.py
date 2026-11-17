@@ -37,3 +37,42 @@ def test_controller_delegates_without_executing_and_preserves_counters(tmp_path:
     finally:
         supervisor._host_timer.cancel()
         supervisor.sink.close()
+
+
+def test_native_mission_survives_separate_controller_and_worker_roots(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    from argus.github_host.portability import rebase
+    from argus.github_host.snapshots import capture, restore
+    monkeypatch.setenv('GIT_CONFIG_COUNT', '1')
+    monkeypatch.setenv('GIT_CONFIG_KEY_0', 'commit.gpgsign')
+    monkeypatch.setenv('GIT_CONFIG_VALUE_0', 'false')
+    source = tmp_path / 'code'
+    source.mkdir()
+    subprocess.run(['git', 'init', '-q'], cwd=source, check=True)
+    state = Project(1, 'owner/repo', 'Implement a bounded feature', 'a' * 40, 'b' * 40)
+    settings = {'backend': 'memory', 'mission_width': 1, 'slice_seconds': 60}
+    controller, memory, dispatches = build_runtime(state, tmp_path / 'controller', source, settings)
+    item = BacklogItem.new(title='Implement result reporting', objective='Produce the requested result reporting',
+        tags=['scope:bounded'], manager_decision={'routed': True, 'vertical': 'software', 'workflow_mode': 'direct'})
+    memory.backlog.add(item)
+    try:
+        controller._run_one(item)
+        assert len(dispatches) == 1
+        save_supervisor(controller, memory.project_root / 'repository-supervisor.json')
+    finally:
+        controller._host_timer.cancel()
+        controller.sink.close()
+    portable = rebase(capture(tmp_path / 'controller'), tmp_path / 'controller', source, portable=True)
+    worker_root = tmp_path / 'worker'
+    restore(worker_root, rebase(portable, worker_root, source, portable=False))
+    worker, memory, _ = build_runtime(state, worker_root, source, settings, worker_item=item.id)
+    try:
+        outcome = worker.tick()
+        assert worker._host_executed
+        assert outcome['success'] and outcome['status'] in {'done', 'success'}, outcome
+        assert memory.backlog.history()[-1].status == 'done'
+        assert worker._host_plans == 0
+    finally:
+        worker._host_timer.cancel()
+        worker.sink.close()

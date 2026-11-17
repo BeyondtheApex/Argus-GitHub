@@ -1,0 +1,6 @@
+{
+  "repository": "microsoft/ArgusAgent",
+  "branch": "main",
+  "commit": "fdfeb715b0749db176c7d8b3212a717fb81087ba",
+  "policy": "candidate-pr-with-explicit-compatibility-and-evaluation-gates"
+}

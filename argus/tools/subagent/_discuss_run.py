@@ -171,6 +171,10 @@ def _run_discussion(
     The periodic task heartbeat keeps this legitimate wait observable; recorded
     process identity distinguishes a dead worker from a long discussion.
     """
+    if os.environ.get('ARGUS_GITHUB_REMOTE_EXECUTE') == '1':
+        from ...github_host.subagents import yield_discussion
+        yield_discussion(task_id, task_data, model, cwd, run_dir, thread_id, usage_totals)
+        return
     concern = task_data.get("concern", "") or task_data.get("last_supervisor_concern", "")
     expected_run_id = str(task_data.get("run_id") or "")
     if task_data.get("preflight"):

@@ -1,0 +1,21 @@
+name: Argus distributed acceptance
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+jobs:
+  native-transport:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+      - name: Exercise real native delegation on an isolated state branch
+        working-directory: runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m argus.github_host.fixtures

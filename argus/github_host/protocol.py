@@ -73,7 +73,7 @@ class Task:
             raise ContractError('Invalid task attempt')
         if type(self.goal_revision) is not int or self.goal_revision < 1:
             raise ContractError('Invalid goal revision')
-        if self.role not in {'mission', 'review', 'research', 'upgrade'}:
+        if self.role not in {'mission', 'review', 'research', 'upgrade', 'api', 'subagent'}:
             raise ContractError('Unknown task role')
         identifier(self.profile)
         if self.state not in ACTIVE | TERMINAL | {'blocked'}:
@@ -115,6 +115,8 @@ class Project:
     feedback: list[dict[str, Any]] = field(default_factory=list)
     deliveries: dict[str, dict[str, Any]] = field(default_factory=dict)
     runtime_history: list[dict[str, Any]] = field(default_factory=list)
+    workspaces: dict[str, str] = field(default_factory=dict)
+    reservations: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def read(cls, value: dict[str, Any]) -> Project:

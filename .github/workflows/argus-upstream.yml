@@ -1,0 +1,26 @@
+name: Argus upstream candidate
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * *'
+concurrency:
+  group: argus-upstream-candidate
+  cancel-in-progress: false
+permissions:
+  contents: write
+  actions: write
+  pull-requests: write
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+      - working-directory: runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m argus.github_host.upstream_sync

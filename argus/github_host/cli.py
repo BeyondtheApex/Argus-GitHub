@@ -60,11 +60,20 @@ def bundle(store: GitStore, project: Project, destination: Path,
         raise ContractError('Bundle requires a durable commit')
     files = store.files_at(revision) if task else store.snapshot()
     restore(destination / 'runtime', files)
+    if task and task.role == 'api' and task.evidence['request'].get('upload_id'):
+        upload = identifier(task.evidence['request']['upload_id'])
+        uploaded = store.files_at(store.base, 'uploads/' + upload)
+        restore(destination / 'runtime' / 'repository-uploads' / upload, uploaded)
     config = store.read(SETTINGS_PATH, settings())
     if task:
         raw = store.git('show', f'{revision}:{SETTINGS_PATH}', check=False)
         if raw.returncode == 0:
             config = json.loads(raw.stdout)
+    reservation_id = (f'{task.id}.{task.attempt}' if task else
+                      'controller-' + os.environ.get('GITHUB_RUN_ID', 'local') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1'))
+    grant = project.reservations.get(reservation_id)
+    if grant:
+        config = {**config, 'global_daily_cap_usd': grant['native_cap_usd']}
     write_json(destination / 'manifest.json', {'schema': 1, 'base_commit': revision,
         'project': project.json(), 'settings': config, 'task': task.json() if task else None})
 
@@ -109,7 +118,7 @@ def prepare(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
             raise ContractError('Worker timeout must be between 5 and 360 minutes')
         output('timeout', timeout)
         return
-    consumed = ingest_commands(store, project)
+    ingest_commands(store, project)
     ready_results = reconcile_runs(project, api)
     recover_failed_runs(store, project)
     store.write(PROJECT_PATH, project.json())
@@ -129,7 +138,14 @@ def prepare(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
     flush_dispatches(store, api)
     store.publish('Recover pending dispatch acknowledgements')
     project = read_project(store)
-    think = should_think(project, new_events=bool(consumed or new_results or delivery_changes))
+    think = should_think(project, new_events=bool(delivery_changes))
+    if think:
+        from .budgets import known_spend, reserve
+        key = 'controller-' + os.environ.get('GITHUB_RUN_ID', 'local') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+        grant = reserve(project, key, store.read(SETTINGS_PATH, {}), spent=known_spend(store.root / 'runtime'))
+        think = grant is not None
+        store.write(PROJECT_PATH, project.json())
+        store.publish('Reserve distributed controller budget before model execution')
     output('think', 'true' if think else 'false')
     output('source_sha', project.source_sha)
     output('runtime_sha', project.runtime_sha)
@@ -150,6 +166,14 @@ def execute(args: argparse.Namespace) -> None:
     before = capture(args.bundle / 'runtime')
     restore(state_root, rebase(before, state_root, source, portable=False))
     configure_provider_state(state_root, owner=task.item_id if task else 'controller')
+    os.environ.update(ARGUS_SKILL_HOME=str(state_root), ARGUS_GITHUB_HOST='1',
+                      ARGUS_GITHUB_WORKTREE=str(source), ARGUS_GITHUB_TASK_ID=task.id if task else 'controller',
+                      ARGUS_SKILL_SESSION_ID=project.id,
+                      ARGUS_SKILL_SESSION_ROOT=str(state_root / 'projects' / project.id),
+                      ARGUS_SKILL_RUNNER_BACKEND=str(manifest['settings'].get('backend', 'codex')),
+                      ARGUS_SKILL_GLOBAL_DAILY_CAP_USD=str(manifest['settings'].get('global_daily_cap_usd', 0)))
+    from .subagents import execute_remote, export_registry, import_registry
+    import_registry(state_root, source)
     actual_source = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=source,
         check=True, capture_output=True, text=True).stdout.strip()
     expected = task.source_sha if task else project.source_sha
@@ -158,23 +182,62 @@ def execute(args: argparse.Namespace) -> None:
     from .native import run_slice
 
     started = time.monotonic()
-    native = run_slice(project, state_root, source, manifest['settings'],
-                       worker_item=task.item_id if task else None)
+    from .budgets import known_spend
+    initial_spend = known_spend(state_root)
+    api_receipt = None
+    try:
+        if task and task.role == 'subagent':
+            spec = task.evidence['subagent_request']
+            spec = json.loads(rebase({'spec.json': canonical(spec)}, state_root, source, portable=False)['spec.json'])
+            outcome = execute_remote(spec, state_root, source, manifest['settings'])
+            native = {'native_outcome': outcome, 'worker_executed': True, 'planning_cycles_this_slice': 0}
+        elif task and task.role == 'api':
+            from .web_bridge import execute_request
+            api_receipt = execute_request(state_root, project, task.evidence['request'])
+            native = {'native_outcome': {'status': 'api_completed', 'success': api_receipt['status'] < 400},
+                      'worker_executed': True, 'planning_cycles_this_slice': 0}
+        else:
+            native = run_slice(project, state_root, source, manifest['settings'],
+                               worker_item=task.item_id if task else None)
+    except Exception as error:
+        from .security import redact
+        failure = {'status': 'host_error', 'stopped_by': 'host_error', 'success': False,
+                   'error': redact(type(error).__name__ + ': ' + str(error), os.environ)}
+        native = {'native_outcome': failure, 'worker_executed': False,
+                  'planning_cycles_this_slice': 0, 'dispatches': [], 'next_pending': False}
+        if task and task.role == 'api':
+            api_receipt = {'path': task.evidence['request']['path'], 'status': 503,
+                'content_type': 'application/json', 'body_b64': base64.b64encode(canonical({'detail': failure['error']})).decode()}
+    export_registry(state_root, source)
+    subagent_requests = []
+    for path in (state_root / 'repository-subagents').glob('*.json'):
+        portable = rebase({'request.json': path.read_bytes()}, state_root, source, portable=True)
+        subagent_requests.append(json.loads(portable['request.json']))
+    from .web_bridge import collect_views
+    views = collect_views(state_root, project)
     after = rebase(capture(state_root), state_root, source, portable=True)
+    from .security import scan_payload
+    scan_payload(after, os.environ)
+    scan_payload({key: base64.b64decode(row['body_b64']) for key, row in views.items()}, os.environ)
     delta = make_delta(before, after)
     metrics = {'execution_seconds': time.monotonic() - started,
                'snapshot_bytes': sum(len(data) for data in after.values()),
                'changed_files': len(delta), 'planning_cycles': native['planning_cycles_this_slice']}
+    from ..core.cost_control import global_daily_usage_summary
+    usage = global_daily_usage_summary(global_root=state_root)
+    metrics.update(cost_usd=max(0.0, usage.known_cost_usd - initial_spend), pricing_status=usage.pricing_status)
     if task:
         # Include new non-ignored files in the reviewable candidate patch.
         subprocess.run(['git', 'add', '--intent-to-add', '--all'], cwd=source, check=True)
-        patch = subprocess.run(['git', 'diff', '--binary', expected, '--', '.'], cwd=source,
+        patch = subprocess.run(['git', 'diff', '--binary', expected, '--', '.', ':(exclude).argus_subagents'], cwd=source,
                                check=True, capture_output=True).stdout
+        scan_payload({'source.patch': patch}, os.environ)
         result = {'schema': 1, 'repository_id': project.repository_id, 'task_id': task.id,
             'attempt': task.attempt, 'goal_revision': task.goal_revision, 'runtime_sha': task.runtime_sha,
             'source_sha': task.source_sha, 'run_id': int(os.environ['GITHUB_RUN_ID']),
             'outcome': native['native_outcome'], 'execution_completed': native['worker_executed'],
-            'delta': delta, 'changes': {'patch_b64': base64.b64encode(patch).decode()}, 'metrics': metrics}
+            'delta': delta, 'changes': {'patch_b64': base64.b64encode(patch).decode()}, 'metrics': metrics,
+            'api_receipt': api_receipt, 'views': views, 'subagent_requests': subagent_requests}
         write_json(args.output / 'result.json', result)
     else:
         write_json(args.output / 'controller.json', {
@@ -182,7 +245,7 @@ def execute(args: argparse.Namespace) -> None:
             + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1'),
             'project_id': project.id, 'goal_revision': project.goal_revision,
             'runtime_sha': project.runtime_sha, 'base_commit': manifest['base_commit'],
-            'delta': delta, **native, 'metrics': metrics})
+            'delta': delta, **native, 'metrics': metrics, 'views': views, 'subagent_requests': subagent_requests})
 
 
 def intake(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
@@ -207,6 +270,10 @@ def intake(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
         command = {'id': 'dispatch-' + os.environ['GITHUB_RUN_ID'],
                    'kind': inputs.get('command', 'request'), 'approved_by': actor,
                    'payload': json.loads(inputs.get('payload') or '{}')}
+        if command['kind'] == 'api':
+            from .web_bridge import normalize_path
+            command['payload']['path'] = normalize_path(command['payload']['path'])
+            identifier(command['payload']['request_id'])
     if command['kind'] == 'initialize':
         if store.read(PROJECT_PATH) is not None:
             raise ContractError('Project already initialized; use an explicit goal revision')
@@ -217,11 +284,35 @@ def intake(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
         runtime = commit_sha(os.environ['GITHUB_SHA'])
         project = Project(metadata['id'], api.repository, objective, runtime, source,
                           open_ended=bool(command['payload'].get('open_ended', True)))
+        if command['payload'].get('start') is False:
+            project.status = 'paused'
         project.continuations = {'requested': True, 'reason': 'initialized'}
         store.write(PROJECT_PATH, project.json())
         store.write(SETTINGS_PATH, settings())
+        from ..core.session import SessionMeta, write_session_meta
+        from ..life.memory import MemoryBundle
+        from .portability import rebase
+        from .snapshots import replace_tree
+        from .web_bridge import collect_views, persist_views
+        state_root = store.root / 'runtime'
+        worktree = Path.cwd().resolve()
+        MemoryBundle.for_cwd(worktree, global_root=state_root, fingerprint=project.id,
+                             label=project.repository).init()
+        write_session_meta(state_root, SessionMeta(id=project.id, display_name=project.repository,
+            created=time.time(), last_active=time.time(), cwd=str(worktree), workdir=str(worktree),
+            objective=project.objective, origin='github'))
+        persist_views(store, collect_views(state_root, project))
+        files = capture(state_root)
+        replace_tree(state_root, files, rebase(files, state_root, worktree, portable=True))
         api.runtime_tag(runtime)
         store.publish('Initialize repository identity and authoritative objective')
+    elif command['kind'] in {'promote-runtime', 'rollback-runtime'}:
+        from .upgrades import promote, rollback
+        project = read_project(store)
+        operation = promote if command['kind'] == 'promote-runtime' else rollback
+        operation(project, command['payload'], api, state_commit=store.base)
+        store.write(PROJECT_PATH, project.json())
+        store.publish('Record authenticated runtime version transition')
     else:
         read_project(store)
         store.write('inbox/' + identifier(command['id']) + '.json', command)

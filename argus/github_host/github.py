@@ -7,6 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
 
 from .protocol import ContractError, Task, commit_sha
@@ -77,19 +78,22 @@ class GitHub:
 
     def find_task_run(self, task: Task) -> dict[str, Any] | None:
         title = f'Argus worker / {task.id} / {task.attempt}'
-        rows = self.pages('/actions/workflows/argus-worker.yml/runs?event=workflow_dispatch', 'workflow_runs')
+        created = datetime.fromtimestamp(task.created_at - 60, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        query = urllib.parse.urlencode({'event': 'workflow_dispatch', 'head_sha': task.runtime_sha, 'created': '>=' + created})
+        rows = self.pages('/actions/workflows/argus-worker.yml/runs?' + query, 'workflow_runs')
         matches = [run for run in rows if run.get('display_title') == title
                    and run.get('head_sha') == task.runtime_sha]
         return min(matches, key=lambda run: run['id']) if matches else None
 
-    def dispatch(self, task: Task) -> int | None:
+    def dispatch(self, task: Task, *, state_branch: str = 'argus-state') -> int | None:
         existing = self.find_task_run(task)
         if existing:
             return int(existing['id'])
         tag = self.runtime_tag(task.runtime_sha)
         self.request('POST', '/actions/workflows/argus-worker.yml/dispatches', {
             'ref': tag, 'inputs': {'task_id': task.id, 'attempt': str(task.attempt),
-                                   'profile': task.profile, 'state_commit': task.snapshot_commit}})
+                                   'profile': task.profile, 'state_commit': task.snapshot_commit,
+                                   'state_branch': state_branch}})
         # An accepted dispatch is not completion and may not be listable yet.
         return None
 
