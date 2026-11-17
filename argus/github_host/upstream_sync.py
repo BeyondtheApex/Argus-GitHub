@@ -40,6 +40,7 @@ def main() -> int:
         if not resume_blocked:
             print('Existing upstream candidate: ' + prs[0]['html_url'])
             return 0
+    candidate_ready = False
     with GitStore(api.repository, token=api._token, branch=branch) as candidate:
         base = prs[0]['head']['sha'] if resume_blocked else current
         candidate.load(revision=base)
@@ -74,6 +75,7 @@ def main() -> int:
                     (candidate.root / '.argus-host' / name).unlink(missing_ok=True)
                 candidate.write('.argus-host/upstream.json', {**config, 'commit': latest})
                 candidate.commit_local('Record candidate upstream revision; retain explicit seam gate')
+                candidate_ready = True
                 body = ('Isolated upstream merge candidate. The seam lock is intentionally unchanged: any upstream '
                         'contract changes require inspection and regression evidence before updating it. '
                         'Runtime promotion is a separate checkpointed operation after compatibility and model acceptance.')
@@ -84,6 +86,10 @@ def main() -> int:
             'head': branch, 'base': metadata['default_branch'], 'draft': True, 'body': description}))
     print(pr['html_url'])
     api.request('POST', '/actions/workflows/argus-host-ci.yml/dispatches', {'ref': branch})
+    if candidate_ready:
+        # Bot-created PR events can await approval or expire without any jobs.
+        # Promotion requires both suites, so dispatch the native suite explicitly.
+        api.request('POST', '/actions/workflows/tests.yml/dispatches', {'ref': branch})
     # Agent-facing work is a structured, trusted event. It does not revise the
     # project's objective or make a candidate the currently executing runtime.
     with GitStore(api.repository, token=api._token) as state:

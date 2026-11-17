@@ -50,6 +50,8 @@ flowchart LR
 
 Pages 部署后单独运行 `Argus Pages projections`，在无模型 key、无写 Token 的 job 中刷新投影，再由可信发布 job 保存；不用为 UI 的读取格式更新升级 agent runtime。状态在投影期间变化时丢弃旧投影，可重新运行。静态公开读取走公开 Git 文件，避免持续消耗匿名 REST 配额。
 
+地图历史保存原生分页及空闲末页，跨 runner 重建索引后，旧游标会从当前第一页重新加载；不会丢弃历史，也不会为每次地图轮询新建 Action。
+
 - 页面“暂停”停止新工作派发，当前已运行 slice 可完成并保存结果。“恢复”继续同一个项目身份。
 - 在原生工作台提交请求，由原生 Manager 评估与路由。需求不直接覆盖长期目标。
 - 普通 Issue 先由程序保存。Pages 的“仓库长期目标与待审核请求”显示原文和哈希，维护者可批准当前版本；内容在批准前被修改会被拒绝。也可以在 Issue 评论 `/argus approve <sha256>`，哈希在 intake Action summary 中显示。
@@ -122,6 +124,8 @@ Git CAS 拒绝旧快照覆盖新状态。先提交 outbox，再派发 Action；�
 ## 跟随上游及回滚
 
 `Argus upstream candidate` 定时读取 `.argus-host/upstream.json` 指定上游，建立隔离候选和 draft PR。冲突会形成可审查报告；不会静默修改当前运行版本。私有集成接口的 AST 指纹在 `.argus-host/compatibility.json`，更新指纹必须先理解变化并通过回归，不能把重新生成文件当成验收。
+
+成功合并的候选显式派发宿主兼容与原上游完整 tests，两项都通过才可能升级。不能依赖 bot 创建 PR 自动触发的测试：这类运行可能等待 GitHub 审批后过期，甚至没有启动任何测试 job。
 
 上游改变 workflow 时，默认 `GITHUB_TOKEN` 无法发布这些修改。可配置仅限该仓库、具备 Contents / Pull requests / Actions / Workflows 写权限的 `ARGUS_UPSTREAM_TOKEN`，仅可信同步作业使用它。未配置时自动生成含**完整升级补丁**的 blocked draft PR；不会部分更新并宣称完成。配置后重跑同步会继续更新同一个 PR。也可用有权限的本地 Git 应用该补丁再审查。blocked/conflict 标记会使兼容门禁失败。
 
