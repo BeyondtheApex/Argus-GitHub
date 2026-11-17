@@ -35,6 +35,15 @@ def identifier(value: Any) -> str:
     return value
 
 
+def native_task_id(value: Any) -> str:
+    """Native team lanes use ``lane::task``; transport ids remain path safe."""
+    if not isinstance(value, str) or not value or len(value) > 240:
+        raise ContractError('Invalid native task identity')
+    for part in value.split('::'):
+        identifier(part)
+    return value
+
+
 def commit_sha(value: Any) -> str:
     if not isinstance(value, str) or not _SHA.fullmatch(value):
         raise ContractError('Expected an immutable Git commit SHA')
@@ -66,7 +75,7 @@ class Task:
 
     def validate(self) -> None:
         identifier(self.id)
-        identifier(self.item_id)
+        native_task_id(self.item_id) if self.role == 'subagent' else identifier(self.item_id)
         for value in (self.runtime_sha, self.source_sha, self.snapshot_commit):
             commit_sha(value)
         if type(self.attempt) is not int or self.attempt < 1:
@@ -152,8 +161,10 @@ class Project:
 
     def queue(self, task: Task) -> None:
         task.validate()
-        if self.status != 'active' or task.goal_revision != self.goal_revision:
+        if self.status not in {'active', 'paused', 'completed'} or task.goal_revision != self.goal_revision:
             raise ContractError('Task cannot be dispatched under the current goal/status')
+        if self.status == 'completed' and task.role != 'api':
+            raise ContractError('Resume a completed project before adding work')
         existing = self.tasks.get(task.id)
         retry = existing and existing['state'] in {'failed', 'blocked'} and task.attempt == existing['attempt'] + 1
         if existing and existing != task.json() and not retry:
@@ -171,6 +182,7 @@ class Project:
         self.goal_revision += 1
         self.objective = objective
         self.status = 'active'
+        self.continuations = {'requested': True, 'reason': 'goal_revised'}
         for task in self.tasks.values():
             if task['state'] in ACTIVE:
                 task['state'] = 'superseded'

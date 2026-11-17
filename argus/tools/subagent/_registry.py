@@ -34,7 +34,9 @@ from ._text import _tail_file
 # Module-level constants (used across multiple subagent modules)
 # ---------------------------------------------------------------------------
 
-REGISTRY_DIR = Path(".argus_subagents")
+REGISTRY_DIR = (Path(os.environ['ARGUS_GITHUB_WORKTREE']) / '.argus_subagents'
+                if os.environ.get('ARGUS_GITHUB_HOST') and os.environ.get('ARGUS_GITHUB_WORKTREE')
+                else Path('.argus_subagents'))
 SUPERVISOR_MODEL = "gpt-5.5"
 
 # Reuse one persistent supervisor thread for at most this many checks,
@@ -58,7 +60,7 @@ _TEAM_TASK_ENV = "ARGUS_SKILL_TEAM_TASK_ID"
 # ---------------------------------------------------------------------------
 
 def _task_file_component(task_id: str) -> str:
-    return portable_filename_component(str(task_id), windows=os.name == "nt")
+    return portable_filename_component(str(task_id), windows=os.name == "nt" or bool(os.environ.get('ARGUS_GITHUB_HOST')))
 
 
 def _registry_root(registry_root: Path | str | None = None) -> Path:

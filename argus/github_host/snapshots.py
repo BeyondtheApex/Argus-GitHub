@@ -14,6 +14,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .protocol import ContractError, canonical
+from .sqlite_state import MAGIC, SUFFIXES, is_logical
+from .sqlite_state import snapshot as snapshot_sqlite
 
 MAX_FILE_BYTES = 40 * 1024 * 1024
 _TRANSIENT = {'.git', '__pycache__', 'node_modules', '.venv', '.cache',
@@ -47,11 +49,16 @@ def capture(root: Path) -> dict[str, bytes]:
             path = base / name
             if name in _TRANSIENT or name.endswith(('.lock', '.pid', '.sock', '.tmp', '.pyc')):
                 continue
+            if name.endswith(('-wal', '-shm', '-journal')) and (base / name.rsplit('-', 1)[0]).suffix in SUFFIXES:
+                continue
             if path.is_symlink():
                 raise ContractError('State snapshots cannot contain symlinks')
             if path.stat().st_size > MAX_FILE_BYTES:
                 raise ContractError(f'State artifact requires an explicit large-file policy: {name}')
-            result[safe_path(path.relative_to(root).as_posix())] = path.read_bytes()
+            data = path.read_bytes()
+            if data.startswith(MAGIC):
+                data = snapshot_sqlite(path)
+            result[safe_path(path.relative_to(root).as_posix())] = data
     return result
 
 
@@ -84,6 +91,8 @@ def _merge_json(base: Any, current: Any, proposed: Any) -> Any:
         return proposed
     if proposed == base or proposed == current:
         return current
+    if base is _MISSING and isinstance(current, dict) and isinstance(proposed, dict):
+        base = {}
     if isinstance(base, dict) and isinstance(current, dict) and isinstance(proposed, dict):
         result = {}
         for key in base.keys() | current.keys() | proposed.keys():
@@ -136,16 +145,27 @@ def merge_delta(base: dict[str, bytes], current: dict[str, bytes],
             value = proposed
         elif proposed == original:
             value = live
-        elif live is not None and proposed is not None and (original is not None or name.endswith(('.json', '.jsonl'))):
+        elif Path(name).name in {'knowledge-recall.sqlite3', 'failure-experience.sqlite3', 'mission-view.json'}:
+            # These indexes are derived from canonical knowledge documents.
+            # Native source_digest validation rebuilds mismatched indexes on
+            # first use. Keep one coherent cache, never mix rows from two indexes.
+            value = live
+        elif live is not None and proposed is not None and (original is not None or name.endswith(('.json', '.jsonl')) or is_logical(proposed)):
             try:
-                if name.endswith('.json'):
-                    value = canonical(_merge_json(json.loads(original or b'{}'), json.loads(live), json.loads(proposed))) + b'\n'
+                if name.endswith('.json') or is_logical(proposed):
+                    base_json, live_json, proposed_json = json.loads(original or b'{}'), json.loads(live), json.loads(proposed)
+                    if name == 'letters.json' and set(live_json) == set(proposed_json) == {'started_at'}:
+                        value = canonical({'started_at': min(live_json['started_at'], proposed_json['started_at'])}) + b'\n'
+                    else:
+                        value = canonical(_merge_json(base_json, live_json, proposed_json)) + b'\n'
                 elif name.endswith('.jsonl'):
                     value = _merge_jsonl(original or b'', live, proposed)
                 else:
                     raise ContractError(f'Concurrent edits conflict: {name}')
             except (json.JSONDecodeError, UnicodeError) as exc:
                 raise ContractError(f'Invalid structured state: {name}') from exc
+            except ContractError as exc:
+                raise ContractError(f'{name}: {exc}') from exc
         else:
             raise ContractError(f'Concurrent deletion/replacement conflicts: {name}')
         if value is None:

@@ -92,7 +92,7 @@ def prepare(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
         if (task.attempt != args.attempt or task.snapshot_commit != args.state_commit
                 or task.goal_revision != project.goal_revision or task.state not in {'pending', 'dispatched', 'running'}):
             raise ContractError('Worker dispatch is no longer authorized')
-        if project.status != 'active':
+        if project.status != 'active' and not (task.role == 'api' and project.status in {'paused', 'completed'}):
             raise ContractError('The project is paused or cancelled')
         if task.runtime_sha != os.environ.get('GITHUB_SHA', task.runtime_sha):
             raise ContractError('Worker runtime version does not match the task')
@@ -165,6 +165,8 @@ def execute(args: argparse.Namespace) -> None:
     from .portability import configure_provider_state, rebase
     before = capture(args.bundle / 'runtime')
     restore(state_root, rebase(before, state_root, source, portable=False))
+    from .sqlite_state import materialize
+    materialize(state_root)
     configure_provider_state(state_root, owner=task.item_id if task else 'controller')
     os.environ.update(ARGUS_SKILL_HOME=str(state_root), ARGUS_GITHUB_HOST='1',
                       ARGUS_GITHUB_WORKTREE=str(source), ARGUS_GITHUB_TASK_ID=task.id if task else 'controller',

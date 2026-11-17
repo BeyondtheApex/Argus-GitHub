@@ -5,11 +5,14 @@ entry points continue using their existing classes and defaults unchanged.
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import os
 import threading
 import time
 from dataclasses import fields
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +81,23 @@ def _unpack(value: Any) -> Any:
 
 
 _CLOCK_FIELDS = {'_idle_since', '_parallel_plan_after', '_last_lifecycle_block_at',
-                 '_last_planner_idle_at', '_last_verification_probe_at'}
+                 '_last_planner_idle_at', '_last_verification_probe_at', '_planner_unchanged_skip_armed_at'}
+
+
+@lru_cache(maxsize=1)
+def continuation_fields() -> set[str]:
+    """Include upstream fields lazily created after the first supervisor tick."""
+    result: set[str] = set()
+    for cls in LifeSupervisor.__mro__:
+        if cls is object:
+            continue
+        tree = ast.parse(inspect.getsource(cls))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
+                    and isinstance(node.value, ast.Name) and node.value.id == 'self'
+                    and node.attr.startswith('_') and not node.attr.startswith('__')):
+                result.add(node.attr)
+    return result
 
 
 def save_supervisor(supervisor: LifeSupervisor, path: Path) -> None:
@@ -103,7 +122,7 @@ def restore_supervisor(supervisor: LifeSupervisor, path: Path) -> None:
         raise ContractError('Unsupported supervisor continuation schema')
     elapsed = max(0.0, time.time() - record['saved_wall'])
     for key, encoded in record['state'].items():
-        if key.startswith('_host_') or key not in vars(supervisor):
+        if key.startswith('_host_') or key not in (vars(supervisor).keys() | continuation_fields()):
             raise ContractError(f'Upstream continuation field changed: {key}')
         value = _unpack(encoded)
         if key in _CLOCK_FIELDS and isinstance(value, (int, float)) and value:
@@ -214,6 +233,8 @@ def build_runtime(project: Project, state_root: Path, worktree: Path,
     from ..life.memory import MemoryBundle
 
     state_root, worktree = state_root.resolve(), worktree.resolve()
+    from .sqlite_state import materialize
+    materialize(state_root)
     os.environ['ARGUS_SKILL_HOME'] = str(state_root)
     os.environ['ARGUS_GITHUB_HOST'] = '1'
     os.environ['ARGUS_GITHUB_WORKTREE'] = str(worktree)

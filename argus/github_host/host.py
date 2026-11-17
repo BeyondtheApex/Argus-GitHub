@@ -43,6 +43,7 @@ def _accept_command(project: Project, command: dict[str, Any]) -> bool:
         raise ContractError('Command payload must be an object')
     if kind == 'pause':
         project.status = 'paused'
+        project.continuations = {'requested': False, 'reason': 'operator_pause'}
     elif kind == 'resume':
         project.status = 'active'
         project.continuations = {'requested': True, 'reason': 'operator_resume'}
@@ -84,6 +85,9 @@ def ingest_commands(store: GitStore, project: Project) -> list[str]:
             continue
         request = command.get('payload', {}) if command['kind'] == 'api' else None
         control = None
+        if request and request.get('method') == 'DELETE' and request.get('path') == '/api/projects/' + project.id:
+            control = 'cancel'
+            command = {**command, 'kind': control, 'payload': {}}
         if request and request.get('method') == 'POST':
             request_path = request.get('path', '')
             prefix = '/api/projects/' + project.id
@@ -97,6 +101,10 @@ def ingest_commands(store: GitStore, project: Project) -> list[str]:
             if control:
                 command = {**command, 'kind': control, 'payload': request.get('body') or {}}
         accept_command(project, command)
+        if command['kind'] == 'resume':
+            from ..life.memory import Backlog
+            backlog = Backlog(store.root / 'runtime' / 'projects' / project.id / 'backlog.jsonl')
+            backlog.resume_paused_statuses({'paused_provider_fence', 'paused_operator'})
         if control:
             import base64
 
@@ -127,8 +135,8 @@ def publish_controller(store: GitStore, proposal: dict[str, Any], *, settings: d
     event_id = identifier(proposal['id'])
     if event_id in project.processed_events:
         return project
-    if project.status != 'active':
-        raise ContractError('Project is paused or cancelled; do not commit new model decisions')
+    if project.status not in {'active', 'paused'}:
+        raise ContractError('Project is cancelled or completed; do not commit new model decisions')
     base = store.files_at(proposal['base_commit'])
     current = store.snapshot()
     updated = merge_delta(base, current, proposal['delta'])
@@ -217,6 +225,8 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
     # A successful Action means an execution report exists. Native outcome and
     # later PR/research acceptance still decide what has actually been achieved.
     task.state = 'completed' if outcome.get('success') else 'failed'
+    if not outcome.get('success'):
+        task.last_error = str(outcome.get('error') or outcome.get('reason') or outcome.get('status') or 'Native execution failed')
     task.evidence = {'native_outcome': outcome, 'run_id': task.run_id,
                      'source_sha': task.source_sha, 'has_code_changes': bool(result.get('changes', {}).get('patch_b64')),
                      **task.evidence}
@@ -248,6 +258,9 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
                                  'outcome': outcome, 'task_id': task.id})
     if task.role != 'api' or task.evidence['request'].get('method', 'GET') != 'GET':
         project.continuations = {'requested': project.status == 'active', 'reason': 'worker_result'}
+    if outcome.get('status') == 'host_error' and task.role == 'mission':
+        restore_failed_item(store.root / 'runtime', project, task.id)
+        project.tasks[task.id]['evidence']['recovered'] = True
     store.write(PROJECT_PATH, project.json())
     return 'accepted'
 
@@ -255,7 +268,7 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
 def flush_dispatches(store: GitStore, api: GitHub, *, lease_seconds: int = 21600) -> int:
     """A durable outbox survives process exit between commit and dispatch."""
     project = read_project(store)
-    if project.status != 'active':
+    if project.status == 'cancelled':
         return 0
     count = 0
     for delivery in project.deliveries.values():
@@ -269,6 +282,8 @@ def flush_dispatches(store: GitStore, api: GitHub, *, lease_seconds: int = 21600
         if operation.get('kind') != 'dispatch' or operation['status'] != 'pending':
             continue
         task = Task.read(project.tasks[operation['task_id']])
+        if project.status != 'active' and task.role != 'api':
+            continue
         if task.goal_revision != project.goal_revision or task.state in {'cancelled', 'superseded'}:
             operation['status'] = 'cancelled'
             continue
@@ -355,11 +370,13 @@ def restore_failed_item(runtime_root: Path, project: Project, task_id: str) -> N
 def recover_failed_runs(store: GitStore, project: Project) -> int:
     recovered = 0
     for task in project.tasks.values():
-        if (task['state'] not in {'failed', 'blocked'} or task.get('result_digest')
+        if (task['state'] not in {'failed', 'blocked'}
                 or task['evidence'].get('recovered') or task['goal_revision'] != project.goal_revision):
             continue
         if task['state'] == 'blocked':
             continue  # ambiguity/conflicts need evidence, not another blind attempt
+        if task.get('result_digest') and task['evidence'].get('native_outcome', {}).get('status') != 'host_error':
+            continue
         if task['role'] != 'mission':
             task['evidence']['recovered'] = True
             if task['role'] == 'api':

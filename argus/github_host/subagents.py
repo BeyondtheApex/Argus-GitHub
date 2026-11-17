@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .protocol import ContractError, Project, Task, canonical, digest, identifier
+from .protocol import ContractError, Project, Task, canonical, digest, identifier, native_task_id
 from .snapshots import capture, restore
 
 
@@ -23,10 +23,10 @@ def root() -> Path:
 
 
 def transport(args: argparse.Namespace) -> int:
-    from ..tools.subagent._registry import _read_task, _write_task
+    from ..tools.subagent._registry import REGISTRY_DIR, _lane_of, _read_task, _write_task
     directory = root()
     directory.mkdir(parents=True, exist_ok=True)
-    task_id = identifier(getattr(args, 'task_id', 'all'))
+    task_id = native_task_id(getattr(args, 'task_id', 'all'))
     if args.subcommand == 'submit':
         existing = _read_task(task_id)
         if existing and existing.get('state') in {'starting', 'running', 'discussing', 'waiting_resource'}:
@@ -34,9 +34,9 @@ def transport(args: argparse.Namespace) -> int:
             return 1
         from ..tools.subagent._cli import _declared_resource_demand
         _declared_resource_demand(args)  # native demand validation before dispatch
-        for file in Path('.argus_subagents').glob('*.json'):
+        for file in REGISTRY_DIR.glob('*.json'):
             row = json.loads(file.read_text(encoding='utf-8'))
-            if row.get('state') == 'discussing' and not args.override_discussion:
+            if (_lane_of(task_id) is None or _lane_of(row.get('task_id')) == _lane_of(task_id)) and row.get('state') == 'discussing' and not args.override_discussion:
                 print(json.dumps({'error': 'Supervisor discussion must be resolved first', 'blocking_task': row['task_id']}))
                 return 1
         request = {'args': vars(args), 'parent_task': os.environ.get('ARGUS_GITHUB_TASK_ID'),
@@ -52,7 +52,7 @@ def transport(args: argparse.Namespace) -> int:
                           'hint': 'Remote work starts after this slice checkpoints. Yield with external_wait; do not poll.'}))
         return 0
     if args.subcommand in {'status', 'wait', 'list'}:
-        rows = [json.loads(path.read_text(encoding='utf-8')) for path in Path('.argus_subagents').glob('*.json')]
+        rows = [json.loads(path.read_text(encoding='utf-8')) for path in REGISTRY_DIR.glob('*.json')]
         if args.subcommand != 'list':
             rows = [row for row in rows if row.get('task_id') == task_id]
         print(json.dumps({'tasks': rows, 'waiting': any(row['state'] in {'starting', 'running', 'discussing', 'waiting_resource'} for row in rows),
@@ -97,11 +97,48 @@ def yield_discussion(task_id: str, task_data: dict[str, Any], model: str, cwd: s
     _write_task(task_id, task)
 
 
+def terminate_owned_processes(row: dict[str, Any], *, grace: float = 20) -> None:
+    """Stop only native-recorded process identities and their descendants.
+
+    STOP offers a cooperative checkpoint window. Recheck identities before any
+    signal so a recycled PID on a self-hosted machine cannot kill unrelated work.
+    """
+    import psutil
+
+    from ..tools.subagent._registry import _recorded_process_alive
+    targets: dict[int, Any] = {}
+    for field in ('worker_pid', 'pid'):
+        if not _recorded_process_alive(row, field):
+            continue
+        try:
+            parent = psutil.Process(int(row[field]))
+            for process in [parent, *parent.children(recursive=True)]:
+                if process.pid != os.getpid():
+                    targets[process.pid] = process
+        except psutil.NoSuchProcess:
+            continue
+    _, alive = psutil.wait_procs(list(targets.values()), timeout=max(0, grace))
+    for process in alive:
+        try:
+            process.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(alive, timeout=5)
+    for process in alive:
+        try:
+            process.kill()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(alive, timeout=5)
+    if any(process.is_running() and process.status() != psutil.STATUS_ZOMBIE for process in alive):
+        raise ContractError('Native process tree has not stopped; refusing a racing checkpoint')
+
+
 def execute_remote(request: dict[str, Any], state_root: Path, worktree: Path, settings: dict[str, Any]) -> dict[str, Any]:
     from ..tools.subagent._discussion_log import _append_discussion, _mirror_discussion_md
     from ..tools.subagent._registry import _read_task, _write_task
     args = request['args']
-    task_id = identifier(args['task_id'])
+    task_id = native_task_id(args['task_id'])
     previous = Path.cwd()
     os.chdir(worktree)
     try:
@@ -150,12 +187,16 @@ def execute_remote(request: dict[str, Any], state_root: Path, worktree: Path, se
                     stop = Path(run_dir) / 'STOP'
                     stop.parent.mkdir(parents=True, exist_ok=True)
                     stop.write_text('GitHub finite execution deadline: checkpoint and stop.\n', encoding='utf-8')
-                row.update(state='timeout', error='Finite runner deadline; checkpoint/resume required')
+                terminate_owned_processes(row, grace=float(settings.get('checkpoint_grace_seconds', 20)))
+                row.update(state='timeout', error='Finite runner deadline; checkpoint/resume required', completed_at=time.time())
                 _write_task(task_id, row)
         return {'status': 'subagent_' + row.get('state', 'unknown'),
                 'success': row.get('state') in {'done', 'early_stopped', 'discussing'},
                 'item_id': task_id, 'remote_record': row}
     finally:
+        row = _read_task(task_id) or {}
+        if row.get('state') in {'done', 'error', 'timeout', 'early_stopped', 'discussing'}:
+            terminate_owned_processes(row, grace=0)
         os.chdir(previous)
 
 
@@ -194,7 +235,7 @@ def queue_remote_requests(store: Any, project: Project, *, parent: Task | None,
                       and int(row.get('gpu_count', 0)) >= gpu_count]
         parent_item = parent.evidence.get('parent_item_id', parent.item_id) if parent else ''
         source = project.workspaces.get(parent_item, parent.source_sha if parent else project.source_sha)
-        task = Task(task_id, identifier(args['task_id']), project.goal_revision, project.runtime_sha,
+        task = Task(task_id, native_task_id(args['task_id']), project.goal_revision, project.runtime_sha,
                     source, snapshot, role='subagent', profile=candidates[0] if candidates else 'ubuntu',
                     evidence={'subagent_request': request, 'parent_item_id': parent_item,
                               'parent_task_id': parent.id if parent else None})

@@ -90,12 +90,12 @@ class GitHub:
         if existing:
             return int(existing['id'])
         tag = self.runtime_tag(task.runtime_sha)
-        self.request('POST', '/actions/workflows/argus-worker.yml/dispatches', {
-            'ref': tag, 'inputs': {'task_id': task.id, 'attempt': str(task.attempt),
+        receipt = self.request('POST', '/actions/workflows/argus-worker.yml/dispatches', {
+            'ref': tag, 'return_run_details': True, 'inputs': {'task_id': task.id, 'attempt': str(task.attempt),
                                    'profile': task.profile, 'state_commit': task.snapshot_commit,
                                    'state_branch': state_branch}})
         # An accepted dispatch is not completion and may not be listable yet.
-        return None
+        return int(receipt['workflow_run_id']) if receipt and receipt.get('workflow_run_id') else None
 
     def validate_run(self, task: Task, run_id: int, *, repository_id: int) -> dict[str, Any]:
         run = self.request('GET', f'/actions/runs/{run_id}')

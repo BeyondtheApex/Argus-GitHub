@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .protocol import canonical
+from .sqlite_state import is_logical
 
 STATE = '@ARGUS_STATE@'
 SOURCE = '@ARGUS_SOURCE@'
@@ -34,7 +35,7 @@ def rebase(files: dict[str, bytes], state_root: Path, source: Path, *, portable:
     result = {}
     for name, data in files.items():
         try:
-            if name.endswith('.json'):
+            if name.endswith('.json') or is_logical(data):
                 result[name] = canonical(strings(json.loads(data))) + b'\n'
             elif name.endswith('.jsonl'):
                 result[name] = b''.join(canonical(strings(json.loads(row))) + b'\n' for row in data.splitlines() if row)
