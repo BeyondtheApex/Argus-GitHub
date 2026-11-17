@@ -136,7 +136,8 @@ def prepare(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
     project = read_project(store)
     from .delivery import reconcile_deliveries
     delivery_changes = reconcile_deliveries(store, project, api, store.read(SETTINGS_PATH, {}))
-    source = commit_sha(api.request('GET', '/git/ref/heads/' + metadata['default_branch'])['object']['sha'])
+    source_branch = store.read(SETTINGS_PATH, {}).get('source_branch', metadata['default_branch'])
+    source = commit_sha(api.request('GET', '/git/ref/heads/' + source_branch)['object']['sha'])
     if source != project.source_sha:
         project.source_sha = source
         project.continuations = {'requested': True, 'reason': 'source_changed'}

@@ -20,7 +20,7 @@ def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings:
         if workspace_head and task.role == 'mission' and result['outcome'].get('success'):
             workspace_id = task.evidence.get('parent_item_id') or task.item_id
             return _delivery_for_revision(api, task, result, commit_sha(workspace_head), workspace_id,
-                                          f'argus/work/{workspace_id}')
+                                          f'argus/work/{workspace_id}', settings)
         return None
     if len(patch) > int(settings.get('max_patch_bytes', 32 * 1024 * 1024)):
         raise ContractError('Candidate exceeds the configured patch size limit')
@@ -74,11 +74,11 @@ def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings:
                     revision = previous
         else:
             candidate.git('push', 'origin', f'HEAD:refs/heads/{branch}')
-    return _delivery_for_revision(api, task, result, revision, workspace_id, branch)
+    return _delivery_for_revision(api, task, result, revision, workspace_id, branch, settings)
 
 
 def _delivery_for_revision(api: GitHub, task: Task, result: dict[str, Any], revision: str,
-                           workspace_id: str, branch: str) -> dict[str, Any]:
+                           workspace_id: str, branch: str, settings: dict[str, Any]) -> dict[str, Any]:
     if task.role == 'subagent' or not result['outcome'].get('success'):
         return {'state': 'checkpoint', 'head_sha': revision, 'workspace_id': workspace_id, 'branch': branch}
     owner = api.repository.split('/')[0]
@@ -90,7 +90,7 @@ def _delivery_for_revision(api: GitHub, task: Task, result: dict[str, Any], revi
     else:
         metadata = api.request('GET', '/')
         pr = api.request('POST', '/pulls', {
-            'title': f'Argus: {task.item_id}', 'head': branch, 'base': metadata['default_branch'],
+            'title': f'Argus: {task.item_id}', 'head': branch, 'base': settings.get('source_branch', metadata['default_branch']),
             'body': f'Candidate for task `{task.id}`, attempt {task.attempt}.\n\n'
                     f'Goal revision: {task.goal_revision}. Source: `{task.source_sha}`.\n'
                     f'Native execution evidence: Actions run {result["run_id"]}.\n\n'
@@ -160,5 +160,5 @@ def reconcile_deliveries(store: GitStore, project: Project, api: GitHub, setting
             changed += 1
     if changed:
         metadata = api.request('GET', '/')
-        project.source_sha = commit_sha(api.request('GET', '/git/ref/heads/' + metadata['default_branch'])['object']['sha'])
+        project.source_sha = commit_sha(api.request('GET', '/git/ref/heads/' + settings.get('source_branch', metadata['default_branch']))['object']['sha'])
     return changed

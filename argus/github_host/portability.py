@@ -50,7 +50,8 @@ def rebase(files: dict[str, bytes], state_root: Path, source: Path, *, portable:
 
 def configure_provider_state(root: Path, *, owner: str) -> None:
     """Use a private persisted provider home, never the host user's login files."""
-    home = root / 'provider-sessions' / owner
+    from ..core.portable_filename import portable_filename_component
+    home = root / 'provider-sessions' / portable_filename_component(owner, windows=True)
     for name, subdir in [('CODEX_HOME', 'codex'), ('CLAUDE_CONFIG_DIR', 'claude')]:
         path = home / subdir
         path.mkdir(parents=True, exist_ok=True)

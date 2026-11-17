@@ -166,7 +166,7 @@ def merge_delta(base: dict[str, bytes], current: dict[str, bytes],
             value = proposed
         elif proposed == original:
             value = live
-        elif Path(name).name in {'knowledge-recall.sqlite3', 'failure-experience.sqlite3', 'mission-view.json'}:
+        elif Path(name).name in {'knowledge-recall.sqlite3', 'failure-experience.sqlite3', 'mission-view.json'} or name.startswith('map-history-cache/'):
             # These indexes are derived from canonical knowledge documents.
             # Native source_digest validation rebuilds mismatched indexes on
             # first use. Keep one coherent cache, never mix rows from two indexes.
@@ -177,6 +177,8 @@ def merge_delta(base: dict[str, bytes], current: dict[str, bytes],
                     base_json, live_json, proposed_json = json.loads(original or b'{}'), json.loads(live), json.loads(proposed)
                     if name == 'cost-control.json':
                         value = canonical(_merge_cost_control(base_json, live_json, proposed_json)) + b'\n'
+                    elif name == 'verticals/catalog.json':
+                        value = canonical(max((live_json, proposed_json), key=lambda row: row.get('fetched_at', 0))) + b'\n'
                     elif name == 'letters.json' and set(live_json) == set(proposed_json) == {'started_at'}:
                         value = canonical({'started_at': min(live_json['started_at'], proposed_json['started_at'])}) + b'\n'
                     else:

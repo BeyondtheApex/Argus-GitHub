@@ -75,6 +75,8 @@ def test_two_native_workers_merge_after_real_controller_run(tmp_path: Path):
             native = run_slice(project, worker_root, source, settings, worker_item=task['item_id'])
             assert native['worker_executed'] and native['native_outcome']['success'], native
             assert native['planning_cycles_this_slice'] == 0
+            from argus.github_host.web_bridge import collect_views
+            collect_views(worker_root, project)
             after = rebase(capture(worker_root), worker_root, source, portable=True)
             results.append({'schema': 1, 'repository_id': 1, 'task_id': task['id'], 'attempt': 1,
                 'goal_revision': 1, 'runtime_sha': task['runtime_sha'], 'source_sha': task['source_sha'],

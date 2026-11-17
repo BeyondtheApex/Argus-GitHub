@@ -222,6 +222,7 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
         updated = merge_delta(base, current, result['delta'])
     except ContractError as error:
         task.state = 'blocked'
+        task.result_digest = digest(result)
         task.last_error = 'Native state merge requires reconciliation: ' + str(error)
         project.tasks[task.id] = task.json()
         store.write(f'runtime/repository-conflicts/{task.id}.{task.attempt}.json', {
@@ -257,8 +258,22 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
     workspace_id = task.evidence.get('parent_item_id') or task.item_id
     if api is not None and (result.get('changes', {}).get('patch_b64') or workspace_id in project.workspaces):
         from .delivery import hold_backlog, publish_candidate
-        delivery = publish_candidate(api, task, result, store.read(SETTINGS_PATH, {}),
-                                     workspace_head=project.workspaces.get(workspace_id))
+        try:
+            delivery = publish_candidate(api, task, result, store.read(SETTINGS_PATH, {}),
+                                         workspace_head=project.workspaces.get(workspace_id))
+        except ContractError as error:
+            delivery = None
+            task.state, task.last_error = 'blocked', str(error)
+            project.tasks[task.id] = task.json()
+            store.write(f'runtime/repository-conflicts/{task.id}.{task.attempt}.json', {
+                'task': task.json(), 'result': result, 'error': str(error)})
+            project.accepted_requests.append({'id': f'code-conflict-{task.id}-{task.attempt}',
+                'approved_by': 'code-reconciler', 'payload': {'text': f'Candidate publication for {task.item_id} needs reconciliation: {error}. '
+                    f'Read $ARGUS_SKILL_HOME/repository-conflicts/{task.id}.{task.attempt}.json and plan a corrective task.'}})
+            from ..life.memory import Backlog
+            backlog = Backlog(store.root / 'runtime' / 'projects' / project.id / 'backlog.jsonl')
+            if any(item.id == task.item_id for item in backlog.history()):
+                backlog.update(task.item_id, status='failed', last_error=task.last_error)
         if delivery:
             project.workspaces[delivery['workspace_id']] = delivery['head_sha']
             if delivery['state'] != 'checkpoint':
