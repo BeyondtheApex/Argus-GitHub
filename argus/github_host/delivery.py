@@ -12,6 +12,16 @@ from .protocol import ContractError, Project, Task, commit_sha
 from .snapshots import safe_path
 
 
+def requires_manual_review(pr: dict[str, Any], files: list[dict[str, Any]]) -> bool:
+    # GitHub limits the PR-files endpoint; incomplete inventories fail closed.
+    if len(files) != pr.get('changed_files'):
+        return True
+    protected = ('.github/', '.argus-host/', 'argus/', 'argus_skill/', 'scripts/',
+                 'frontend/scripts/', 'tools/', 'pyproject.toml', 'uv.lock', 'package.json', 'package-lock.json')
+    return any(any(name.startswith(prefix) for prefix in protected)
+               for row in files for name in (row['filename'], row.get('previous_filename', '')))
+
+
 def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings: dict[str, Any],
                       *, workspace_head: str | None = None) -> dict[str, Any] | None:
     encoded = result.get('changes', {}).get('patch_b64', '')
@@ -96,6 +106,10 @@ def _delivery_for_revision(api: GitHub, task: Task, result: dict[str, Any], revi
                     f'Native execution evidence: Actions run {result["run_id"]}.\n\n'
                     'Delivery remains pending until the candidate is validated and merged.',
             'draft': not bool(result.get('outcome', {}).get('success'))})
+    # An agent may propose maintenance of its own host, but cannot approve a
+    # change to the code that will later receive publishing credentials.
+    files = api.pages(f'/pulls/{pr["number"]}/files')
+    manual = requires_manual_review(pr, files)
     validation_key = f'{task.id}-{task.attempt}-{revision[:12]}'
     return {'task_id': task.id, 'attempt': task.attempt, 'state': 'awaiting_review',
             'workspace_id': workspace_id,
@@ -103,6 +117,7 @@ def _delivery_for_revision(api: GitHub, task: Task, result: dict[str, Any], revi
             'source_sha': task.source_sha, 'runtime_sha': task.runtime_sha,
             'validation_key': validation_key, 'validation_pending': True,
             'native_success': bool(result['outcome'].get('success')),
+            'requires_manual_review': manual,
             'created_at': time.time()}
 
 
@@ -149,7 +164,8 @@ def reconcile_deliveries(store: GitStore, project: Project, api: GitHub, setting
             changed += 1
             continue
         validated = delivery.get('validation', {}).get('conclusion') == 'success'
-        if (settings.get('auto_merge', False) and validated and delivery['native_success']
+        if (settings.get('auto_merge', False) and not delivery.get('requires_manual_review', True)
+                and validated and delivery['native_success']
                 and project.goal_revision == project.tasks[task_id]['goal_revision']
                 and project.status == 'active' and not pr['merged'] and pr['state'] == 'open'):
             api.request('PUT', f'/pulls/{pr["number"]}/merge',

@@ -7,6 +7,7 @@ import type {
 import { useI18n } from '../i18n';
 import { loadPdfEngine, resetPdfEngine } from '../lib/pdfEngine';
 import { Spinner } from './primitives';
+import { hostFetch as fetch } from '../github/transport';
 
 export function pdfContainScale(
   pageWidth: number,

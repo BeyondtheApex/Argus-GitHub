@@ -56,10 +56,14 @@ def collect_views(root: Path, project: Project) -> dict[str, Any]:
     app = make_app(root, project)
     sid = project.id
     paths = ['/api/meta', '/api/projects', '/api/projects/costs', '/api/metrics', '/api/skill-library',
-             '/api/wiki', '/api/knowledge/feed', '/api/verticals', '/api/map-datasets']
+             '/api/wiki', '/api/knowledge/feed', '/api/verticals', '/api/map-datasets', '/api/plugins']
+    paths.extend(['/api/skill-library?sid=' + sid, '/api/wiki?sid=' + sid, '/api/knowledge/feed?limit=20'])
+    paths.extend('/api/map-copy/project/' + sid + '?locale=' + locale + '&session_id=' + sid
+                 for locale in ('en-US', 'zh-CN'))
     tails = ['/snapshot?compact=true&events_limit=1', '/status', '/journal?n=20', '/config', '/identity',
-             '/transcript?n=30', '/events?limit=80&view=ui', '/events?limit=500&view=ui', '/artifacts',
-             '/artifacts?include_reading=true', '/map', '/map-info', '/map-history', '/wiki', '/learning',
+             '/transcript?n=30', '/transcript?n=120', '/snapshot?compact=false&events_limit=40',
+             '/events?limit=80&view=ui', '/events?limit=120&view=ui', '/events?limit=500&view=ui', '/artifacts',
+             '/artifacts?include_reading=true', '/map', '/map-info', '/map-history', '/map-notes', '/wiki', '/learning',
              '/advisor/config', '/advisor/consultations', '/research/method', '/cost-control']
     paths.extend('/api/projects/' + sid + tail for tail in tails)
     views = {}

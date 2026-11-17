@@ -1,4 +1,5 @@
 import { apiAuthHeaders } from './api';
+import { hostFetch as fetch } from '../github/transport';
 
 export interface WorkspaceProfile {
   id: string;

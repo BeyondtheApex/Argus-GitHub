@@ -12,6 +12,7 @@ import type {
   Turn,
 } from './types';
 import { authHeaders, authToken, compatibleApiMeta, requestWithTimeout, requireDaemonCommand } from '../api';
+import { githubMode, hostFetch as fetch, hostStream } from '../github/transport';
 import type { TimelineEntry, TimelineInput, TimelineReport } from './timeline/types';
 
 const LOCAL_READ_TIMEOUT_MS = 12_000;
@@ -276,6 +277,7 @@ export function openEventStream(
   onEvent: (event: EventMsg) => void,
   onConnection: (connected: boolean) => void,
 ): StreamState {
+  if (githubMode) return { close: hostStream<EventMsg>(sid, onEvent, () => onConnection(true)) };
   let closed = false;
   let socket: WebSocket | null = null;
   let retry: number | undefined;

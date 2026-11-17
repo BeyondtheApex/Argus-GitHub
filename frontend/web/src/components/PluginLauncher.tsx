@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Boxes, Diamond, ArrowUpRight, X, Download, Loader2, RefreshCw, Ellipsis } from 'lucide-react';
 import { authHeaders } from '../api';
+import { hostFetch as fetch } from '../github/transport';
 import { PluginEnvironment, type PluginHealth, type PluginSetup } from './PluginEnvironment';
 import { pluginEntryState, preparingSentence, unavailableSentence, type PluginEntry } from '../lib/pluginLaunch';
 

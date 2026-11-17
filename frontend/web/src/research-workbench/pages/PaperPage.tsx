@@ -10,6 +10,7 @@ import { useWorkbenchText } from '../useWorkbenchText';
 import { useWorkspaceBlobUrl } from '../useWorkspaceBlobUrl';
 import { useWorkspaceProfile } from '../useWorkspaceProfile';
 import type { WorkspacePageProps } from './pageTypes';
+import { hostFetch as fetch } from '../../github/transport';
 
 type OutputTab = 'pdf' | 'figures' | 'references';
 function isImage(entry: WorkspaceEntry) { return ['.png', '.jpg', '.jpeg', '.webp', '.svg'].includes(entry.extension); }

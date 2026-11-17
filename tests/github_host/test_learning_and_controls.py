@@ -83,3 +83,10 @@ def test_reconfiguration_requires_pause_and_validates_runner_profile():
     state.status = 'paused'
     replace_settings(store, state, config)
     assert store.saved == ('host/settings.json', config)
+
+
+def test_native_preferences_cannot_raise_repository_budget():
+    from argus.github_host.configuration import effective
+    base = {'global_daily_cap_usd': 10, 'global_daily_token_cap': 10000}
+    assert effective(base, {'ARGUS_SKILL_GLOBAL_DAILY_CAP_USD': '0', 'ARGUS_SKILL_GLOBAL_DAILY_TOKEN_CAP': '20000'}) == base
+    assert effective(base, {'ARGUS_SKILL_GLOBAL_DAILY_CAP_USD': '5'})['global_daily_cap_usd'] == 5

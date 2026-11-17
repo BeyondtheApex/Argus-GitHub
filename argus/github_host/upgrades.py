@@ -42,9 +42,10 @@ def promote(project: Project, payload: dict[str, Any], api: Any, *, state_commit
         raise ContractError('Pause and drain the project before promoting a runtime')
     if any(row['state'] in {'dispatched', 'running', 'awaiting_review'} for row in project.tasks.values()):
         raise ContractError('Runtime promotion waits for live tasks and delivery reviews to settle')
-    runs = api.pages('/actions/workflows/argus-host-ci.yml/runs?head_sha=' + revision, 'workflow_runs')
-    if not any(row['conclusion'] == 'success' and row['head_sha'] == revision for row in runs):
-        raise ContractError('Candidate has no successful compatibility run at this exact commit')
+    for workflow in ('argus-host-ci.yml', 'tests.yml'):
+        runs = api.pages('/actions/workflows/' + workflow + '/runs?head_sha=' + revision, 'workflow_runs')
+        if not any(row['conclusion'] == 'success' and row['head_sha'] == revision for row in runs):
+            raise ContractError('Candidate has no successful ' + workflow + ' run at this exact commit')
     check_state_format(api, project.runtime_sha, revision)
     acceptance = check_acceptance(project, payload, api, revision)
     api.runtime_tag(revision)

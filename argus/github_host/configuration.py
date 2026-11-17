@@ -21,6 +21,12 @@ def effective(base: dict[str, Any], knobs: dict[str, Any]) -> dict[str, Any]:
     for key, (target, cast) in _KNOBS.items():
         if knobs.get(key) not in ('', None):
             result[target] = cast(knobs[key])
+    # Native preferences can tighten, but never silently relax, the repository
+    # owner's distributed budget policy. Only authenticated configure can do so.
+    for name in ('global_daily_cap_usd', 'global_daily_token_cap'):
+        cap = base.get(name, 0)
+        if cap > 0 and (result.get(name, cap) <= 0 or result.get(name, cap) > cap):
+            result[name] = cap
     return result
 
 

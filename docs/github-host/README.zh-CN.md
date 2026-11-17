@@ -48,11 +48,14 @@ flowchart LR
 
 原生工作台保留项目、任务、研究、地图、技能、知识、产物等视图。数据从 Git 中的投影读取；尚未生成的查询和写操作转为独立 API Worker。原生 HTTP handler 在有限 job 内执行，不部署常驻 WebAPI。
 
+Pages 部署后单独运行 `Argus Pages projections`，在无模型 key、无写 Token 的 job 中刷新投影，再由可信发布 job 保存；不用为 UI 的读取格式更新升级 agent runtime。状态在投影期间变化时丢弃旧投影，可重新运行。静态公开读取走公开 Git 文件，避免持续消耗匿名 REST 配额。
+
 - 页面“暂停”停止新工作派发，当前已运行 slice 可完成并保存结果。“恢复”继续同一个项目身份。
 - 在原生工作台提交请求，由原生 Manager 评估与路由。需求不直接覆盖长期目标。
 - 普通 Issue 先由程序保存。Pages 的“仓库长期目标与待审核请求”显示原文和哈希，维护者可批准当前版本；内容在批准前被修改会被拒绝。也可以在 Issue 评论 `/argus approve <sha256>`，哈希在 intake Action summary 中显示。
 - 请求被 GitHub 接受时只显示 accepted；看到状态回执后才显示 completed。刷新后恢复请求 id 的追踪，但需重新授权。浏览器只保存仓库名和请求元数据，不保存 Token 或请求正文。
 - 代码修改先保存工作分支，原生任务成功后建立 PR。独立 Action 验证 exact candidate SHA。默认由维护者审核合并；`auto_merge: true` 才允许通过验证后自动合并。
+- 宿主、workflow、授权策略、子 agent hooks 和依赖入口等控制代码始终需要人工合并，即使打开 auto_merge；agent 可以提出自维护修改，但不能自行批准改变发布凭据所运行的代码。
 - 验证失败会反馈给主控，并保留候选、日志和失败原因。不是不断重复执行同一个未变更结果。
 
 所有控制也能在 Actions → **Argus intake** → Run workflow 完成：
@@ -72,6 +75,8 @@ flowchart LR
 | `acknowledge-reservation` | `{"reservation_id":"...","reason":"核实依据"}` | 显式处理未知费用保留项 |
 
 修改源码中的 `.argus-host/config.json` 不会暗中覆盖现有项目的运行策略。初始化会复制它，后续使用 `configure` 明确更新 `host/settings.json`；原生工作台的模型设置使用原生 `runtime/config.json`，具有对应参数的覆盖权。已排队任务保留其快照和 runtime SHA。
+
+原生预算配置只能收紧仓库预算，不能将其提高或改成无限。放宽预算必须通过维护者的 `configure`。
 
 ## 持久化和恢复
 
