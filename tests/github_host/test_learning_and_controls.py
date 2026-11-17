@@ -59,11 +59,13 @@ def test_explicit_controls_apply_to_native_backlog_and_emit_receipts(tmp_path: P
         item = BacklogItem.new(title='Resume controlled work', objective='Recover after operator pause')
         backlog.add(item)
         backlog.update(item.id, status='paused_operator')
+        store.write('inbox/dispatch-0.json', {'id': 'dispatch-0', 'kind': 'retry', 'approved_by': 'maintainer', 'payload': {'task_id': 'does-not-exist'}})
         store.write('inbox/dispatch-1.json', {'id': 'dispatch-1', 'kind': 'resume', 'approved_by': 'maintainer'})
         assert ingest_commands(store, state) == ['dispatch-1']
         assert state.status == 'active'
         assert backlog.next_pending().id == item.id
         assert store.read('commands/dispatch-1.json')['status'] == 'applied'
+        assert store.read('commands/dispatch-0.json')['status'] == 'failed'
         store.write('inbox/dispatch-2.json', {'id': 'dispatch-2', 'kind': 'cancel', 'approved_by': 'maintainer'})
         ingest_commands(store, state)
         assert state.status == 'cancelled'

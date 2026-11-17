@@ -104,7 +104,17 @@ def ingest_commands(store: GitStore, project: Project) -> list[str]:
                 control = ('revise-goal' if body.get('objective') else 'resume') if body.get('enabled') else 'pause'
             if control:
                 command = {**command, 'kind': control, 'payload': request.get('body') or {}}
-        accept_command(project, command)
+        try:
+            accept_command(project, command)
+        except (ContractError, KeyError) as error:
+            # One invalid operator command must not poison the whole durable
+            # inbox and prevent later pause/resume/recovery commands from running.
+            store.write('commands/' + identifier(command['id']) + '.json', {
+                'status': 'failed', 'kind': command.get('kind'), 'error': str(error)})
+            destination = store.root / 'rejected-commands' / path.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            path.replace(destination)
+            continue
         if command['kind'] in {'revise-goal', 'cancel'}:
             from ..life.memory import Backlog
             backlog = Backlog(store.root / 'runtime' / 'projects' / project.id / 'backlog.jsonl')
