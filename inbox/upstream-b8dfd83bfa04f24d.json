@@ -1,0 +1,1 @@
+{"approved_by":"upstream-sync-workflow","id":"upstream-b8dfd83bfa04f24d","kind":"request","payload":{"text":"Review upstream candidate PR #2 at b8dfd83bfa04f24d63d45729f0b5948b661d0a73. Resolve adapter conflicts, verify compatibility, and record native-versus-host evaluation. Do not promote or merge until configured acceptance gates pass."}}
