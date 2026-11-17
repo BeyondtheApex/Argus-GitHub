@@ -75,7 +75,9 @@ jobs:
       - name: Run one native controller slice without repository write credentials
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL || vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || vars.OPENAI_MODEL }}
+          OPENAI_WIRE_API: ${{ vars.OPENAI_WIRE_API }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python -m argus.github_host execute --bundle host-input --runtime "$RUNNER_TEMP/native" --worktree project --output host-output
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

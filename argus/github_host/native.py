@@ -269,6 +269,8 @@ def build_runtime(project: Project, state_root: Path, worktree: Path,
     options = {key: value for key, value in settings.items()
                if key in {field.name for field in fields(LifeWorkerConfig)}
                and key not in {'life_dir', 'global_root', 'project_workdir', 'project_fingerprint'}}
+    from .model_provider import apply_role_defaults
+    apply_role_defaults(options)
     cfg = LifeWorkerConfig(life_dir=memory.project_root, global_root=state_root,
                            project_workdir=worktree, project_fingerprint=project.id,
                            **options)

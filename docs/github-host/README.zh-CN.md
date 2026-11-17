@@ -35,7 +35,7 @@ flowchart LR
 1. Fork 本仓库，默认分支使用 `github-host`。在 Actions 页面启用该 fork 的 workflows。
 2. 在 Settings → Actions → General 允许工作流创建 PR；组织策略若禁止该能力，需要管理员调整。工作流内已经声明各 job 所需权限。
 3. 在 Settings → Pages 将 Source 设为 **GitHub Actions**，运行 `Argus Pages`。不需要服务器。
-4. 在 Settings → Secrets and variables → Actions 添加 `OPENAI_API_KEY`。当前默认安装并固定 Codex CLI，配置为 `backend: codex`。可选仓库变量 `OPENAI_BASE_URL`。模型凭据只交给执行 job；不要放到 Issue、输入 JSON、Git 文件或网页 PAT 字段。
+4. 在 Settings → Secrets and variables → Actions 添加 `OPENAI_API_KEY`。使用 OpenAI 兼容服务时，同时配置 `OPENAI_BASE_URL` 和 `OPENAI_MODEL`（均可用 Secrets 或 Variables，Secrets 优先）。当前默认安装并固定 Codex CLI，配置为 `backend: codex`，需要服务支持 Responses API。模型凭据只交给执行 job；不要放到 Issue、输入 JSON、Git 文件或网页 PAT 字段。
 5. 检查 `.argus-host/config.json` 的模型、并行度、预算和验证命令。默认 `global_daily_cap_usd: 0` 表示不设预算上限，建议在启动前设置符合自己的金额及 token 限额。
 6. 打开 Pages，输入 `owner/repository`。公开项目可匿名读取。要操作，创建**仅授权该仓库**的 fine-grained PAT：Contents 读取、Actions 读写；上传附件另需 Contents 写入，私有 Issue 审核需 Issues 读取。维护者身份与 API 的具体操作权限是两项检查。PAT 仅存在当前页内存，刷新后需重新输入；不是模型 API key。
 7. 填写长期目标、边界及验收条件，选择“建立项目，暂不运行”或“初始化并启动”。后者会开始产生模型调用。
@@ -43,6 +43,25 @@ flowchart LR
 当前部署不支持直接从纯静态 Pages 完成 Device Flow。不要把客户端 secret 或 PAT 打包进静态页面来绕过这个边界。
 
 其他 provider 的原生代码仍保留，但当前 Actions 默认只安装 Codex。要启用其他 provider，需修改固定版本的 `.github/actions/argus-host-setup/action.yml`，声明对应 Secrets，并完成同样的验收。未安装的 backend 会明确失败，不应静默切换到测试 backend。
+
+### OpenAI 兼容 API 配置与检查
+
+仓库 Settings → Secrets and variables → Actions：
+
+| 名称 | 放置位置 | 含义 |
+|---|---|---|
+| `OPENAI_API_KEY` | Repository Secret | 服务商 API 密钥 |
+| `OPENAI_BASE_URL` | Secret 或 Variable | 完整 API 根地址，通常以 `/v1` 结尾，不要填 `/responses`；不允许把密钥放进 URL |
+| `OPENAI_MODEL` | Secret 或 Variable | 该服务实际支持的精确模型 ID，不假定其具有 OpenAI 默认模型目录 |
+| `OPENAI_WIRE_API` | Variable，可省略 | 当前原生 Codex 适配为 `responses`；填 `chat` 会在发送请求前明确拒绝 |
+
+执行时为该角色的隔离 `CODEX_HOME` 生成 named provider 配置，以环境变量引用密钥。配置文件不写入持久记忆；会话和其他原生状态继续恢复。Engineer/Reviewer 没有显式模型设置时采用 `OPENAI_MODEL`，已经显式选择的角色模型继续有效；其他角色通过原生 provider 配置解析模型，不强制套用 OpenAI 的默认廉价模型。
+
+配置后运行 **Argus model connection and resume**。它在第一个 runner 上通过原生 AgentCliRunner 读取随机验证文件，保存会话；另一个独立 runner 恢复同一会话，在没有原文件且禁用工具的情况下回忆内容。同时检查原生完成状态、会话身份和 usage 计量。它会产生实际模型请求及相应费用，但不会恢复真实项目、启动长期任务或升级 runtime。
+
+检查结果保存为 Actions artifact。缺配置、接口协议不支持、恢复失败或凭据出现在 checkpoint 中都会明确失败。这只是连接、工具、计量和跨 runner 会话检查，**不等于软件重构/研究质量或性能配对基准通过**。
+
+如果服务仅提供 Chat Completions，需明确选择和配置另一个支持该接口的原生后端并建立对应基线；当前不会用不透明的协议转换或降级后端假装等价兼容。
 
 ## 日常操作
 

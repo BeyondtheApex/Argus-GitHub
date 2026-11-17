@@ -1,0 +1,68 @@
+name: Argus model connection and resume
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  first:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+        with:
+          model: 'true'
+      - name: Check native tool use with the configured provider
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL || vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || vars.OPENAI_MODEL }}
+          OPENAI_WIRE_API: ${{ vars.OPENAI_WIRE_API }}
+        run: python -m argus.github_host.model_check first --root "$RUNNER_TEMP/first" --output provider-first
+      - if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: provider-first
+          path: provider-first
+          include-hidden-files: true
+          retention-days: 7
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: provider-first-failure-report
+          path: provider-first/report.json
+          if-no-files-found: ignore
+          retention-days: 7
+  resume:
+    needs: first
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: runtime
+          persist-credentials: false
+      - uses: ./runtime/.github/actions/argus-host-setup
+        with:
+          model: 'true'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: provider-first
+          path: provider-check-input
+      - name: Restore the session on a different runner and verify recall
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL || vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || vars.OPENAI_MODEL }}
+          OPENAI_WIRE_API: ${{ vars.OPENAI_WIRE_API }}
+        run: python -m argus.github_host.model_check resume --root "$RUNNER_TEMP/resumed" --output provider-resumed
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: provider-resumed-report
+          path: provider-resumed/report.json
+          if-no-files-found: ignore
+          retention-days: 14

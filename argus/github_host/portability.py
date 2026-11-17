@@ -77,3 +77,5 @@ def configure_provider_state(root: Path, *, owner: str) -> None:
         os.environ[name] = str(path)
     if os.environ.get('OPENAI_API_KEY'):
         os.environ['CODEX_API_KEY'] = os.environ['OPENAI_API_KEY']
+    from .model_provider import configure
+    configure(home / 'codex')

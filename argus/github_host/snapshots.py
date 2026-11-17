@@ -47,6 +47,9 @@ def capture(root: Path) -> dict[str, bytes]:
                             if name not in _TRANSIENT and not (base / name).is_symlink())
         for name in sorted(files):
             path = base / name
+            if (name == 'config.toml' and base.name == 'codex'
+                    and path.relative_to(root).parts[0] == 'provider-sessions'):
+                continue  # regenerated route metadata may originate in Secrets
             if name in _TRANSIENT or name.endswith(('.lock', '.pid', '.sock', '.tmp', '.pyc')):
                 continue
             if name.endswith(('-wal', '-shm', '-journal')) and (base / name.rsplit('-', 1)[0]).suffix in SUFFIXES:
@@ -148,6 +151,9 @@ def merge_delta(base: dict[str, bytes], current: dict[str, bytes],
     merged = dict(current)
     for raw_name, change in delta.items():
         name = safe_path(raw_name)
+        parts = PurePosixPath(name).parts
+        if parts[0] == 'provider-sessions' and len(parts) >= 3 and parts[-2:] == ('codex', 'config.toml'):
+            raise ContractError('Ephemeral provider configuration cannot be published as memory')
         if any(part in _TRANSIENT for part in PurePosixPath(name).parts):
             raise ContractError('Credential or transient path in result')
         if change.get('base_sha256') != sha(base.get(name)):
