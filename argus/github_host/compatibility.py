@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 SEAMS = {
     'argus/life/supervisor/_core.py': ['LifeSupervisor.__init__', 'LifeSupervisor.tick', 'LifeSupervisor._run_with_inbox'],
@@ -17,6 +18,21 @@ SEAMS = {
     'argus/tools/subagent/_registry.py': ['reconcile_terminal_task'],
     'argus/tools/subagent/_discuss_run.py': ['_run_discussion'],
 }
+
+
+def stable_ast(node: ast.AST) -> Any:
+    """Ignore empty optional AST fields introduced by newer Python versions."""
+    fields = {}
+    for key, value in ast.iter_fields(node):
+        if value is None or value == []:
+            continue
+        if isinstance(value, ast.AST):
+            fields[key] = stable_ast(value)
+        elif isinstance(value, list):
+            fields[key] = [stable_ast(item) if isinstance(item, ast.AST) else item for item in value]
+        else:
+            fields[key] = value
+    return [type(node).__name__, fields]
 
 
 def fingerprint(root: Path) -> dict[str, str]:
@@ -34,7 +50,9 @@ def fingerprint(root: Path) -> dict[str, str]:
         for name in names:
             if name not in found:
                 raise ValueError(f'Upstream integration seam disappeared: {file}:{name}')
-            result[file + ':' + name] = hashlib.sha256(ast.dump(found[name], include_attributes=False).encode()).hexdigest()
+            value = json.dumps(stable_ast(found[name]), sort_keys=True, ensure_ascii=True,
+                               default=lambda value: {'literal_type': type(value).__name__, 'repr': repr(value)})
+            result[file + ':' + name] = hashlib.sha256(value.encode()).hexdigest()
     return result
 
 

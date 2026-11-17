@@ -28,7 +28,7 @@ class GitHub:
     def request(self, method: str, path: str, data: Any = None, *, raw: bool = False) -> Any:
         if not path.startswith('/') or path.startswith('//') or '\\' in path:
             raise ContractError('API path must be repository-relative')
-        url = f'https://api.github.com/repos/{self.repository}{path}'
+        url = f'https://api.github.com/repos/{self.repository}{"" if path == "/" else path}'
         request = urllib.request.Request(url, method=method,
             data=None if data is None else json.dumps(data, allow_nan=False).encode(),
             headers={'Authorization': f'Bearer {self._token}',

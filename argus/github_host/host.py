@@ -85,13 +85,13 @@ def ingest_commands(store: GitStore, project: Project) -> list[str]:
         request = command.get('payload', {}) if command['kind'] == 'api' else None
         control = None
         if request and request.get('method') == 'POST':
-            path = request.get('path', '')
+            request_path = request.get('path', '')
             prefix = '/api/projects/' + project.id
-            if path == prefix + '/daemon/start':
+            if request_path == prefix + '/daemon/start':
                 control = 'resume'
-            elif path == prefix + '/daemon/stop':
+            elif request_path == prefix + '/daemon/stop':
                 control = 'pause'
-            elif path == prefix + '/continuous':
+            elif request_path == prefix + '/continuous':
                 body = request.get('body') or {}
                 control = ('revise-goal' if body.get('objective') else 'resume') if body.get('enabled') else 'pause'
             if control:
@@ -274,6 +274,11 @@ def flush_dispatches(store: GitStore, api: GitHub, *, lease_seconds: int = 21600
             continue
         from .budgets import known_spend, reserve
         settings = store.read(SETTINGS_PATH, {})
+        profile = settings.get('profiles', {}).get(task.profile, {})
+        capacity = int(profile.get('max_concurrency', max(2, int(settings.get('mission_width', 2)) + 2)))
+        occupied = sum(row['profile'] == task.profile and row['state'] in {'dispatched', 'running'} for row in project.tasks.values())
+        if occupied >= capacity:
+            continue
         grant = reserve(project, key, settings, spent=known_spend(store.root / 'runtime'))
         if grant is None:
             continue
