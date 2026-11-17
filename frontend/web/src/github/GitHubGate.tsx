@@ -3,8 +3,13 @@ import { command, connect, disconnect, hostConnection, hostPending, readState, s
 
 type Project = { id: string; objective: string; status: string; goal_revision: number; runtime_sha: string };
 
+function savedRepository(): string {
+  try { return localStorage.getItem('argus-repository') || import.meta.env.VITE_GITHUB_REPOSITORY || ''; }
+  catch { return import.meta.env.VITE_GITHUB_REPOSITORY || ''; }
+}
+
 export default function GitHubGate({ children }: { children: ReactNode }) {
-  const [repository, setRepository] = useState(() => localStorage.getItem('argus-repository') || import.meta.env.VITE_GITHUB_REPOSITORY || '');
+  const [repository, setRepository] = useState(savedRepository);
   const [token, setToken] = useState('');
   const [objective, setObjective] = useState('');
   const [project, setProject] = useState<Project | null>(null);
@@ -27,7 +32,11 @@ export default function GitHubGate({ children }: { children: ReactNode }) {
 
   async function login() {
     setBusy(true); setError('');
-    try { await connect(repository.trim(), token); localStorage.setItem('argus-repository', repository.trim()); setToken(''); }
+    try {
+      await connect(repository.trim(), token);
+      try { localStorage.setItem('argus-repository', repository.trim()); } catch { /* optional preference */ }
+      setToken('');
+    }
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   }
@@ -65,7 +74,8 @@ export default function GitHubGate({ children }: { children: ReactNode }) {
       <h1 className="text-xl font-semibold">建立这个仓库的长期目标</h1>
       <p className="text-sm">先在仓库 Secrets 配置模型凭据，并检查 .argus-host/config.json。目标会成为版本化的权威状态。</p>
       <textarea className="min-h-40 w-full rounded border p-3 text-black" value={objective} onChange={event => setObjective(event.target.value)} placeholder="项目要持续实现什么？完成条件和不能突破的边界是什么？" />
-      <button disabled={!host.canWrite || busy || !objective.trim()} onClick={() => void control('initialize', { objective, open_ended: true })} className="rounded bg-ink px-4 py-2 text-paper disabled:opacity-50">初始化并启动</button>
+      <div className="flex gap-3"><button disabled={!host.canWrite || busy || !objective.trim()} onClick={() => void control('initialize', { objective, open_ended: true, start: false })} className="rounded border px-4 py-2 disabled:opacity-50">建立项目，暂不运行</button>
+      <button disabled={!host.canWrite || busy || !objective.trim()} onClick={() => void control('initialize', { objective, open_ended: true })} className="rounded bg-ink px-4 py-2 text-paper disabled:opacity-50">初始化并启动</button></div>
     </section>}
   </div>;
 }

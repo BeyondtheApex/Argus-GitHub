@@ -121,6 +121,27 @@ def _merge_jsonl(base: bytes, current: bytes, proposed: bytes) -> bytes:
     return b''.join(canonical(merged[key]) + b'\n' for key in order if key in merged)
 
 
+def _merge_cost_control(base: dict[str, Any], current: dict[str, Any], proposed: dict[str, Any]) -> dict[str, Any]:
+    # Native accounting is daily, keyed by call identity, and keeps explicit
+    # unknown-cost liabilities. Timestamp changes are not semantic conflicts.
+    if current.get('day') != proposed.get('day'):
+        return max((current, proposed), key=lambda row: row.get('day', ''))
+    result = _merge_json({key: val for key, val in base.items() if key not in {'updated_at', 'project_roots', 'reservations', 'unresolved'}},
+                         {key: val for key, val in current.items() if key not in {'updated_at', 'project_roots', 'reservations', 'unresolved'}},
+                         {key: val for key, val in proposed.items() if key not in {'updated_at', 'project_roots', 'reservations', 'unresolved'}})
+    result['updated_at'] = max(current.get('updated_at', 0), proposed.get('updated_at', 0))
+    result['project_roots'] = sorted(set(current.get('project_roots', [])) | set(proposed.get('project_roots', [])))
+    for key in ('reservations', 'unresolved'):
+        blocks = [document.get(key, []) for document in (base, current, proposed)]
+        if any(any(not row.get('call_id') for row in block) for block in blocks):
+            raise ContractError('Native cost-control row has no call identity')
+        maps = [{row['call_id']: row for row in block} for block in blocks]
+        if any(len(mapping) != len(block) for mapping, block in zip(maps, blocks)):
+            raise ContractError('Native cost-control row identity is duplicated')
+        result[key] = list(_merge_json(*maps).values())
+    return result
+
+
 def merge_delta(base: dict[str, bytes], current: dict[str, bytes],
                 delta: dict[str, dict[str, Any]]) -> dict[str, bytes]:
     """Merge atomically in memory; callers write nothing on any conflict."""
@@ -154,7 +175,9 @@ def merge_delta(base: dict[str, bytes], current: dict[str, bytes],
             try:
                 if name.endswith('.json') or is_logical(proposed):
                     base_json, live_json, proposed_json = json.loads(original or b'{}'), json.loads(live), json.loads(proposed)
-                    if name == 'letters.json' and set(live_json) == set(proposed_json) == {'started_at'}:
+                    if name == 'cost-control.json':
+                        value = canonical(_merge_cost_control(base_json, live_json, proposed_json)) + b'\n'
+                    elif name == 'letters.json' and set(live_json) == set(proposed_json) == {'started_at'}:
                         value = canonical({'started_at': min(live_json['started_at'], proposed_json['started_at'])}) + b'\n'
                     else:
                         value = canonical(_merge_json(base_json, live_json, proposed_json)) + b'\n'

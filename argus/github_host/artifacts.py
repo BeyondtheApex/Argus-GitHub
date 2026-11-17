@@ -21,8 +21,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def download_result(api: GitHub, run_id: int) -> dict[str, Any]:
+    return download_json(api, run_id, artifact_name='argus-result', filename='result.json')
+
+
+def download_json(api: GitHub, run_id: int, *, artifact_name: str, filename: str) -> dict[str, Any]:
     artifacts = api.pages(f'/actions/runs/{run_id}/artifacts', 'artifacts')
-    found = [item for item in artifacts if item['name'] == 'argus-result' and not item['expired']]
+    found = [item for item in artifacts if item['name'] == artifact_name and not item['expired']]
     if len(found) != 1 or found[0]['size_in_bytes'] > MAX_ARCHIVE:
         raise ContractError('Expected exactly one bounded worker result artifact')
     url = f'https://api.github.com/repos/{api.repository}/actions/artifacts/{found[0]["id"]}/zip'
@@ -45,6 +49,6 @@ def download_result(api: GitHub, run_id: int) -> dict[str, Any]:
         raise ContractError('Artifact exceeds download limit')
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         entries = archive.infolist()
-        if len(entries) != 1 or entries[0].filename != 'result.json' or entries[0].file_size > MAX_ARCHIVE:
+        if len(entries) != 1 or entries[0].filename != filename or entries[0].file_size > MAX_ARCHIVE:
             raise ContractError('Unexpected result archive members')
         return json.loads(archive.read(entries[0]))

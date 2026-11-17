@@ -82,7 +82,7 @@ class Task:
             raise ContractError('Invalid task attempt')
         if type(self.goal_revision) is not int or self.goal_revision < 1:
             raise ContractError('Invalid goal revision')
-        if self.role not in {'mission', 'review', 'research', 'upgrade', 'api', 'subagent'}:
+        if self.role not in {'mission', 'review', 'research', 'upgrade', 'api', 'subagent', 'learning'}:
             raise ContractError('Unknown task role')
         identifier(self.profile)
         if self.state not in ACTIVE | TERMINAL | {'blocked'}:
@@ -163,7 +163,7 @@ class Project:
         task.validate()
         if self.status not in {'active', 'paused', 'completed'} or task.goal_revision != self.goal_revision:
             raise ContractError('Task cannot be dispatched under the current goal/status')
-        if self.status == 'completed' and task.role != 'api':
+        if self.status == 'completed' and task.role not in {'api', 'learning'}:
             raise ContractError('Resume a completed project before adding work')
         existing = self.tasks.get(task.id)
         retry = existing and existing['state'] in {'failed', 'blocked'} and task.attempt == existing['attempt'] + 1

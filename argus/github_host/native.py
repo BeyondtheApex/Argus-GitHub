@@ -310,7 +310,7 @@ def build_runtime(project: Project, state_root: Path, worktree: Path,
         planner_runner=getattr(runner, 'planner_backend', None) or getattr(runner, 'backend', None),
         skill_store=getattr(runner, '_manager_skill_store', None), dispatches=dispatches,
         slots=(1 if worker_item else max(0, cfg.mission_width - sum(
-            row['state'] in {'pending', 'dispatched', 'running', 'awaiting_review'} and row['role'] not in {'api', 'subagent'}
+            row['state'] in {'pending', 'dispatched', 'running', 'awaiting_review'} and row['role'] not in {'api', 'subagent', 'learning'}
             for row in project.tasks.values()))),
         deadline=time.monotonic() + float(settings.get('slice_seconds', 2400)),
         worker_item=worker_item)

@@ -16,6 +16,8 @@
     "argus/tools/subagent/_cli.py:main": "d102adfbf103487b31fdef6ab49c8a57d3628df88df322426cd50b6ea4493f2f",
     "argus/tools/subagent/_registry.py:reconcile_terminal_task": "bbc622668afa57ce3fb792243b6e6118061696f0f295f9754f8457d037779bcc",
     "argus/tools/subagent/_registry.py:_task_file_component": "f9c58afb501ab9da8d314ef15e5c4f04274d0c5c344972aeb5ce4bef69820b9e",
-    "argus/tools/subagent/_discuss_run.py:_run_discussion": "7ffddd10b867d321457a94efb33ddbf8f0861e929329bf13bc3bb378ca6459a1"
+    "argus/tools/subagent/_discuss_run.py:_run_discussion": "7ffddd10b867d321457a94efb33ddbf8f0861e929329bf13bc3bb378ca6459a1",
+    "argus/life/answer_learning.py:resume_learning": "17ec97eaa3ecf4b2ca346f2e607ae80eaedaa2da510a787ac7fcb8a77df3ab72",
+    "argus/life/answer_learning.py:_process": "54c2ccaaf9bb78dbbddcf3089f6bd073ac250add9ca639c77a0508bf80d7de8d"
   }
 }

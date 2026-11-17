@@ -17,7 +17,7 @@ export function subscribeHost(fn: () => void) { listeners.add(fn); return () => 
 function notify() { for (const fn of listeners) fn(); }
 export function hostConnection() { return connection; }
 export function hostPending() { return [...pending.values()]; }
-export function disconnect() { credential = ''; connection = undefined; cache.clear(); notify(); }
+export function disconnect() { credential = ''; connection = undefined; cache.clear(); pending.clear(); notify(); }
 
 async function github(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
@@ -44,7 +44,7 @@ export async function connect(repository: string, token: string): Promise<Connec
     cache.clear();
     notify();
     return connection;
-  } catch (error) { credential = ''; throw error; }
+  } catch (error) { credential = ''; connection = undefined; throw error; }
 }
 
 function current(): Connection {
@@ -89,7 +89,7 @@ async function hash(path: string) {
     .map(x => x.toString(16).padStart(2, '0')).join('');
 }
 function responseFrom(receipt: Receipt) {
-  return new Response(Uint8Array.from(atob(receipt.body_b64), char => char.charCodeAt(0)), {
+  return new Response([204, 205, 304].includes(receipt.status) ? null : Uint8Array.from(atob(receipt.body_b64), char => char.charCodeAt(0)), {
     status: receipt.status, headers: { 'Content-Type': receipt.content_type },
   });
 }
@@ -194,7 +194,10 @@ export function hostStream<T>(sid: string, onEvent: (event: T) => void, onOpen?:
       }
       if (seen.size > 2000) { const recent = [...seen].slice(-1000); seen.clear(); recent.forEach(key => seen.add(key)); }
       onOpen?.();
-    } finally { if (!closed) timer = setTimeout(poll, document.hidden ? 60_000 : 15_000); }
+    } catch {
+      // Network and rate-limit failures are retried on the next bounded poll.
+      // Every callback handles its own failure, including timer callbacks.
+    } finally { if (!closed) timer = setTimeout(() => { void poll(); }, document.hidden ? 60_000 : 15_000); }
   };
   void poll().catch(() => {});
   return () => { closed = true; clearTimeout(timer); };

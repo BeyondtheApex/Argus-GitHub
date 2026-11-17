@@ -19,12 +19,13 @@ def main() -> int:
     parser.add_argument('--task-id', default=os.environ.get('TASK_ID', ''))
     parser.add_argument('--candidate-sha', default=os.environ.get('CANDIDATE_SHA', ''))
     parser.add_argument('--validation-key', default=os.environ.get('VALIDATION_KEY', ''))
+    parser.add_argument('--state-branch', default=os.environ.get('STATE_BRANCH', 'argus-state'))
     parser.add_argument('--manifest', type=Path, default=Path('validation.json'))
     parser.add_argument('--worktree', type=Path, default=Path('candidate'))
     args = parser.parse_args()
     if args.mode == 'prepare':
         api = GitHub(os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_TOKEN'])
-        with GitStore(api.repository, token=api._token) as store:
+        with GitStore(api.repository, token=api._token, branch=args.state_branch) as store:
             store.load()
             project = read_project(store)
             delivery = project.deliveries[identifier(args.task_id)]

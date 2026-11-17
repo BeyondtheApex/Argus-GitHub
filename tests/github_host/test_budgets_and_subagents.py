@@ -6,6 +6,7 @@ from pathlib import Path
 
 from argus.github_host.budgets import reserve, settle
 from argus.github_host.protocol import Project
+from argus.github_host.snapshots import make_delta, merge_delta
 from argus.github_host.subagents import transport
 from argus.tools.subagent._registry import reconcile_terminal_task
 
@@ -26,6 +27,19 @@ def test_parallel_capacity_is_not_allocated_twice_and_unknown_cost_stays_held():
 def test_remote_registry_does_not_use_local_process_liveness():
     row = {'task_id': 'remote', 'state': 'running', 'transport': 'github-actions', 'pid': 99999999}
     assert reconcile_terminal_task('remote', row) == row
+
+
+def test_native_cost_control_merges_independent_calls_and_retains_liabilities():
+    base = {'version': 2, 'day': '2026-11-17', 'reservations': [], 'unresolved': [],
+            'project_roots': [], 'acknowledgements': {}, 'updated_at': 1}
+    left = {**base, 'unresolved': [{'call_id': 'a', 'reason': 'unknown cost'}], 'updated_at': 2}
+    right = {**base, 'unresolved': [{'call_id': 'b', 'reason': 'unknown cost'}], 'updated_at': 3}
+    def files(value):
+        return {'cost-control.json': json.dumps(value).encode()}
+    merged = merge_delta(files(base), files(left), make_delta(files(base), files(right)))
+    result = json.loads(merged['cost-control.json'])
+    assert {row['call_id'] for row in result['unresolved']} == {'a', 'b'}
+    assert result['updated_at'] == 3
 
 
 def test_subagent_submit_and_wait_are_durable_and_nonblocking(tmp_path: Path, monkeypatch, capsys):

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import download_result
+from .configuration import effective, read_settings, slice_limits
 from .git_store import GitStore, StateConflict
 from .github import GitHub, approved_issue
 from .host import (
@@ -69,11 +70,15 @@ def bundle(store: GitStore, project: Project, destination: Path,
         raw = store.git('show', f'{revision}:{SETTINGS_PATH}', check=False)
         if raw.returncode == 0:
             config = json.loads(raw.stdout)
+    config = effective(config, json.loads(files.get('config.json', b'{}')))
+    if task:
+        config, _ = slice_limits(config, task.profile)
     reservation_id = (f'{task.id}.{task.attempt}' if task else
                       'controller-' + os.environ.get('GITHUB_RUN_ID', 'local') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1'))
     grant = project.reservations.get(reservation_id)
     if grant:
-        config = {**config, 'global_daily_cap_usd': grant['native_cap_usd']}
+        config = {**config, 'global_daily_cap_usd': grant['native_cap_usd'],
+                  'global_daily_token_cap': grant.get('native_token_cap', config.get('global_daily_token_cap', 0))}
     write_json(destination / 'manifest.json', {'schema': 1, 'base_commit': revision,
         'project': project.json(), 'settings': config, 'task': task.json() if task else None})
 
@@ -92,7 +97,8 @@ def prepare(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
         if (task.attempt != args.attempt or task.snapshot_commit != args.state_commit
                 or task.goal_revision != project.goal_revision or task.state not in {'pending', 'dispatched', 'running'}):
             raise ContractError('Worker dispatch is no longer authorized')
-        if project.status != 'active' and not (task.role == 'api' and project.status in {'paused', 'completed'}):
+        if project.status != 'active' and not ((task.role == 'api' and project.status in {'paused', 'completed'})
+                or (task.role == 'learning' and project.status == 'completed')):
             raise ContractError('The project is paused or cancelled')
         if task.runtime_sha != os.environ.get('GITHUB_SHA', task.runtime_sha):
             raise ContractError('Worker runtime version does not match the task')
@@ -113,12 +119,13 @@ def prepare(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
         if not profile or not isinstance(profile.get('runs_on'), list):
             raise ContractError('Worker resource profile has not been configured')
         output('runs_on', json.dumps(profile['runs_on']))
-        timeout = int(profile.get('timeout_minutes', 60))
-        if not 5 <= timeout <= 360:
-            raise ContractError('Worker timeout must be between 5 and 360 minutes')
+        _, timeout = slice_limits(read_settings(store), task.profile)
         output('timeout', timeout)
         return
+    from .recovery import cancel_obsolete_runs, recover_controllers
+    project = recover_controllers(store, project, api, current_run=os.environ.get('GITHUB_RUN_ID', ''))
     ingest_commands(store, project)
+    cancel_obsolete_runs(project, api)
     ready_results = reconcile_runs(project, api)
     recover_failed_runs(store, project)
     store.write(PROJECT_PATH, project.json())
@@ -140,9 +147,11 @@ def prepare(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
     project = read_project(store)
     think = should_think(project, new_events=bool(delivery_changes))
     if think:
-        from .budgets import known_spend, reserve
+        from .budgets import known_spend, known_tokens, reserve
         key = 'controller-' + os.environ.get('GITHUB_RUN_ID', 'local') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
-        grant = reserve(project, key, store.read(SETTINGS_PATH, {}), spent=known_spend(store.root / 'runtime'))
+        config = read_settings(store)
+        grant = reserve(project, key, config, spent=known_spend(store.root / 'runtime'),
+                        tokens=known_tokens(store.root / 'runtime') if config.get('global_daily_token_cap') else 0)
         think = grant is not None
         store.write(PROJECT_PATH, project.json())
         store.publish('Reserve distributed controller budget before model execution')
@@ -173,7 +182,8 @@ def execute(args: argparse.Namespace) -> None:
                       ARGUS_SKILL_SESSION_ID=project.id,
                       ARGUS_SKILL_SESSION_ROOT=str(state_root / 'projects' / project.id),
                       ARGUS_SKILL_RUNNER_BACKEND=str(manifest['settings'].get('backend', 'codex')),
-                      ARGUS_SKILL_GLOBAL_DAILY_CAP_USD=str(manifest['settings'].get('global_daily_cap_usd', 0)))
+                      ARGUS_SKILL_GLOBAL_DAILY_CAP_USD=str(manifest['settings'].get('global_daily_cap_usd', 0)),
+                      ARGUS_SKILL_GLOBAL_DAILY_TOKEN_CAP=str(manifest['settings'].get('global_daily_token_cap', 0)))
     from .subagents import execute_remote, export_registry, import_registry
     import_registry(state_root, source)
     actual_source = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=source,
@@ -188,7 +198,11 @@ def execute(args: argparse.Namespace) -> None:
     initial_spend = known_spend(state_root)
     api_receipt = None
     try:
-        if task and task.role == 'subagent':
+        if task and task.role == 'learning':
+            from .learning import execute_learning
+            outcome = execute_learning(state_root, task)
+            native = {'native_outcome': outcome, 'worker_executed': True, 'planning_cycles_this_slice': 0}
+        elif task and task.role == 'subagent':
             spec = task.evidence['subagent_request']
             spec = json.loads(rebase({'spec.json': canonical(spec)}, state_root, source, portable=False)['spec.json'])
             outcome = execute_remote(spec, state_root, source, manifest['settings'])

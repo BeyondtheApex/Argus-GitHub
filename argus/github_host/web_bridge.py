@@ -82,6 +82,10 @@ def execute_request(root: Path, project: Project, request: dict[str, Any]) -> di
     method = str(request.get('method', 'GET')).upper()
     if method not in {'GET', 'POST', 'PATCH', 'DELETE'}:
         raise ContractError('Unsupported API method')
+    if method == 'DELETE' and path.split('?')[0] == '/api/projects/' + project.id:
+        raise ContractError('Project cancellation must pass through authenticated repository intake')
+    if method == 'POST' and path.split('?')[0] == '/api/projects':
+        raise ContractError('Each repository has one durable identity; initialize another repository for another project')
     if any(word in path.split('?')[0] for word in ('/pairing', '/runtime/source-update', '/daemon/',
             '/continuous', '/launch-cwd', '/workdir', '/reset', '/trash', '/plugins/')) or path == '/api/daemons':
         raise ContractError('This machine operation is managed by repository controls')

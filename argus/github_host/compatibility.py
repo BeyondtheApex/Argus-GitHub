@@ -17,6 +17,7 @@ SEAMS = {
     'argus/tools/subagent/_cli.py': ['cmd_submit', 'main'],
     'argus/tools/subagent/_registry.py': ['reconcile_terminal_task', '_task_file_component'],
     'argus/tools/subagent/_discuss_run.py': ['_run_discussion'],
+    'argus/life/answer_learning.py': ['resume_learning', '_process'],
 }
 
 

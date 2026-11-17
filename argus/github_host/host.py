@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .configuration import read_settings
 from .git_store import GitStore
 from .github import GitHub
 from .protocol import ACTIVE, ContractError, Project, Task, digest, identifier, validate_result
@@ -72,6 +73,9 @@ def _accept_command(project: Project, command: dict[str, Any]) -> bool:
         task.state, task.run_id, task.result_digest = 'pending', None, None
         task.last_error, task.dispatched_at = '', None
         project.queue(task)
+    elif kind == 'acknowledge-reservation':
+        from .budgets import acknowledge
+        acknowledge(project, identifier(payload['reservation_id']), reason=str(payload.get('reason', '')), actor=command['approved_by'])
     else:
         raise ContractError('Unknown repository command')
     return True
@@ -101,6 +105,12 @@ def ingest_commands(store: GitStore, project: Project) -> list[str]:
             if control:
                 command = {**command, 'kind': control, 'payload': request.get('body') or {}}
         accept_command(project, command)
+        if command['kind'] in {'revise-goal', 'cancel'}:
+            from ..life.memory import Backlog
+            backlog = Backlog(store.root / 'runtime' / 'projects' / project.id / 'backlog.jsonl')
+            for item in backlog.active():
+                backlog.update(item.id, status='superseded' if command['kind'] == 'revise-goal' else 'aborted',
+                               last_error='Explicit repository control: ' + command['kind'])
         if command['kind'] == 'resume':
             from ..life.memory import Backlog
             backlog = Backlog(store.root / 'runtime' / 'projects' / project.id / 'backlog.jsonl')
@@ -145,7 +155,7 @@ def publish_controller(store: GitStore, proposal: dict[str, Any], *, settings: d
     # creating task references. Both commits are sent in a single Git push.
     snapshot = store.commit_local('Checkpoint native Argus controller state')
     active = [Task.read(row) for row in project.tasks.values() if row['state'] in ACTIVE
-              and row['role'] not in {'api', 'subagent'}]
+              and row['role'] not in {'api', 'subagent', 'learning'}]
     width = int(settings.get('mission_width', 2))
     available = max(0, width - len(active))
     candidates = proposal.get('dispatches', [])
@@ -164,6 +174,8 @@ def publish_controller(store: GitStore, proposal: dict[str, Any], *, settings: d
         project.queue(task)
     from .subagents import queue_remote_requests
     queue_remote_requests(store, project, parent=None, requests=proposal.get('subagent_requests', []))
+    from .learning import queue_learning
+    queue_learning(store, project)
     project.accept_event(event_id, {'digest': digest(proposal)})
     from .budgets import settle
     settle(project, proposal['id'], proposal.get('metrics', {}))
@@ -212,6 +224,17 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
         task.state = 'blocked'
         task.last_error = 'Native state merge requires reconciliation: ' + str(error)
         project.tasks[task.id] = task.json()
+        store.write(f'runtime/repository-conflicts/{task.id}.{task.attempt}.json', {
+            'task': task.json(), 'result': result, 'error': str(error)})
+        project.accepted_requests.append({'id': f'conflict-{task.id}-{task.attempt}', 'approved_by': 'state-reconciler',
+            'payload': {'text': f'Distributed task {task.item_id} produced a conflicting state proposal. '
+                        f'Exact evidence is in $ARGUS_SKILL_HOME/repository-conflicts/{task.id}.{task.attempt}.json. '
+                        'Plan a focused reconciliation task using the retained result; do not blindly repeat the failed route.'}})
+        if task.role == 'mission':
+            from ..life.memory import Backlog
+            backlog = Backlog(store.root / 'runtime' / 'projects' / project.id / 'backlog.jsonl')
+            if any(item.id == task.item_id for item in backlog.active()):
+                backlog.update(task.item_id, status='failed', last_error=task.last_error)
         project.continuations = {'requested': True, 'reason': 'worker_state_conflict'}
         store.write(PROJECT_PATH, project.json())
         return 'conflict'
@@ -231,9 +254,11 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
                      'source_sha': task.source_sha, 'has_code_changes': bool(result.get('changes', {}).get('patch_b64')),
                      **task.evidence}
     project.tasks[task.id] = task.json()
-    if api is not None and result.get('changes', {}).get('patch_b64'):
+    workspace_id = task.evidence.get('parent_item_id') or task.item_id
+    if api is not None and (result.get('changes', {}).get('patch_b64') or workspace_id in project.workspaces):
         from .delivery import hold_backlog, publish_candidate
-        delivery = publish_candidate(api, task, result, store.read(SETTINGS_PATH, {}))
+        delivery = publish_candidate(api, task, result, store.read(SETTINGS_PATH, {}),
+                                     workspace_head=project.workspaces.get(workspace_id))
         if delivery:
             project.workspaces[delivery['workspace_id']] = delivery['head_sha']
             if delivery['state'] != 'checkpoint':
@@ -243,6 +268,8 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
                 project.tasks[task.id] = task.json()
     from .subagents import queue_remote_requests
     queue_remote_requests(store, project, parent=task, requests=result.get('subagent_requests', []))
+    from .learning import queue_learning
+    queue_learning(store, project)
     from .web_bridge import persist_views, view_key
     persist_views(store, result.get('views', {}))
     if task.role == 'api':
@@ -253,7 +280,7 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
         store.write('api/' + identifier(request['request_id']) + '.json', receipt)
         if request.get('method', 'GET') == 'GET':
             persist_views(store, {view_key(receipt['path']): receipt})
-    if result.get('execution_completed') and task.role not in {'api', 'subagent'}:
+    if result.get('execution_completed') and task.role not in {'api', 'subagent', 'learning'}:
         project.feedback.append({'id': f'{task.id}.{task.attempt}', 'consumed': False,
                                  'outcome': outcome, 'task_id': task.id})
     if task.role != 'api' or task.evidence['request'].get('method', 'GET') != 'GET':
@@ -276,25 +303,28 @@ def flush_dispatches(store: GitStore, api: GitHub, *, lease_seconds: int = 21600
             api.request('POST', '/actions/workflows/argus-validate.yml/dispatches', {
                 'ref': api.runtime_tag(delivery['runtime_sha']),
                 'inputs': {'task_id': delivery['task_id'], 'candidate_sha': delivery['head_sha'],
-                           'validation_key': delivery['validation_key']}})
+                           'validation_key': delivery['validation_key'], 'state_branch': store.branch}})
             delivery['validation_pending'] = False
     for key, operation in project.outbox.items():
         if operation.get('kind') != 'dispatch' or operation['status'] != 'pending':
             continue
         task = Task.read(project.tasks[operation['task_id']])
-        if project.status != 'active' and task.role != 'api':
+        if project.status != 'active' and not (task.role == 'api' or (task.role == 'learning' and project.status == 'completed')):
             continue
         if task.goal_revision != project.goal_revision or task.state in {'cancelled', 'superseded'}:
             operation['status'] = 'cancelled'
             continue
-        from .budgets import known_spend, reserve
-        settings = store.read(SETTINGS_PATH, {})
+        from .budgets import known_spend, known_tokens, reserve
+        settings = read_settings(store)
         profile = settings.get('profiles', {}).get(task.profile, {})
         capacity = int(profile.get('max_concurrency', max(2, int(settings.get('mission_width', 2)) + 2)))
         occupied = sum(row['profile'] == task.profile and row['state'] in {'dispatched', 'running'} for row in project.tasks.values())
         if occupied >= capacity:
             continue
-        grant = reserve(project, key, settings, spent=known_spend(store.root / 'runtime'))
+        if task.role == 'api' and task.evidence['request'].get('method', 'GET') == 'GET':
+            settings = {**settings, 'global_daily_cap_usd': 0, 'global_daily_token_cap': 0}
+        grant = reserve(project, key, settings, spent=known_spend(store.root / 'runtime'),
+                        tokens=known_tokens(store.root / 'runtime') if settings.get('global_daily_token_cap') else 0)
         if grant is None:
             continue
         store.write(PROJECT_PATH, project.json())
@@ -333,6 +363,8 @@ def reconcile_runs(project: Project, api: GitHub, *, max_attempts: int = 3) -> l
             else:
                 task.last_error = f"GitHub execution ended: {run['conclusion']}"
                 task.state = 'failed'
+                from .budgets import settle
+                settle(project, f'{task.id}.{task.attempt}', {'pricing_status': 'unpriced'})
                 project.continuations = {'requested': True, 'reason': 'worker_failed'}
         else:
             task.run_id, task.state = run['id'], 'running'

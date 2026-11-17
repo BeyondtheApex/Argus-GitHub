@@ -115,6 +115,9 @@ def retry_learning(
 def resume_learning(
     root: Path, *, backend_factory: BackendFactory | None = None,
 ) -> threading.Thread:
+    if os.environ.get('ARGUS_GITHUB_HOST'):
+        from ..github_host.learning import deferred_thread
+        return deferred_thread()
     root = root.resolve()
     with _LOCK:
         if backend_factory is not None:

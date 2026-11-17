@@ -6,18 +6,21 @@ import json
 import time
 from typing import Any
 
-from .git_store import GitStore
+from .git_store import GitStore, StateConflict
 from .github import GitHub
 from .protocol import ContractError, Project, Task, commit_sha
 from .snapshots import safe_path
 
 
-def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any] | None:
+def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings: dict[str, Any],
+                      *, workspace_head: str | None = None) -> dict[str, Any] | None:
     encoded = result.get('changes', {}).get('patch_b64', '')
-    if not encoded:
-        return None
     patch = base64.b64decode(encoded, validate=True)
     if not patch:
+        if workspace_head and task.role == 'mission' and result['outcome'].get('success'):
+            workspace_id = task.evidence.get('parent_item_id') or task.item_id
+            return _delivery_for_revision(api, task, result, commit_sha(workspace_head), workspace_id,
+                                          f'argus/work/{workspace_id}')
         return None
     if len(patch) > int(settings.get('max_patch_bytes', 32 * 1024 * 1024)):
         raise ContractError('Candidate exceeds the configured patch size limit')
@@ -54,10 +57,28 @@ def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings:
                 expected_tree = candidate.git('rev-parse', 'HEAD^{tree}').stdout
                 actual_tree = candidate.git('rev-parse', previous + '^{tree}').stdout
                 if expected_tree != actual_tree:
-                    raise ContractError('Concurrent workspace candidate requires code reconciliation')
-                revision = previous
+                    if previous != workspace_head:
+                        raise ContractError('Workspace branch changed outside its recorded lineage')
+                    candidate.git('reset', '--soft', previous)
+                    candidate.git('read-tree', previous)
+                    applied = candidate.git('apply', '--cached', '--3way', '--binary', '--whitespace=nowarn', '-', data=patch, check=False)
+                    if applied.returncode:
+                        raise ContractError('Concurrent workspace changes overlap; retain both proposals for reconciliation')
+                    if candidate.git('diff', '--cached', '--quiet', check=False).returncode:
+                        candidate.git('-c', 'core.hooksPath=/dev/null', 'commit', '-q', '-m', f'Merge independent task {task.id}')
+                    pushed = candidate.git('push', 'origin', f'HEAD:refs/heads/{branch}', check=False)
+                    if pushed.returncode:
+                        raise StateConflict('Workspace advanced during candidate publication; replay with current lineage')
+                    revision = candidate.git('rev-parse', 'HEAD').stdout.decode().strip()
+                else:
+                    revision = previous
         else:
             candidate.git('push', 'origin', f'HEAD:refs/heads/{branch}')
+    return _delivery_for_revision(api, task, result, revision, workspace_id, branch)
+
+
+def _delivery_for_revision(api: GitHub, task: Task, result: dict[str, Any], revision: str,
+                           workspace_id: str, branch: str) -> dict[str, Any]:
     if task.role == 'subagent' or not result['outcome'].get('success'):
         return {'state': 'checkpoint', 'head_sha': revision, 'workspace_id': workspace_id, 'branch': branch}
     owner = api.repository.split('/')[0]
@@ -107,7 +128,7 @@ def reconcile_deliveries(store: GitStore, project: Project, api: GitHub, setting
             changed += 1
             continue
         runs = api.pages('/actions/workflows/argus-validate.yml/runs?event=workflow_dispatch&head_sha='
-                         + delivery['runtime_sha'], 'workflow_runs')
+                         + delivery['runtime_sha'] + '&created=>=' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(delivery['created_at'] - 60)), 'workflow_runs')
         matches = [row for row in runs if row.get('display_title') == 'Argus validate / ' + delivery['validation_key']]
         validation = max(matches, key=lambda row: row['id']) if matches else None
         if validation and validation['status'] == 'completed':
