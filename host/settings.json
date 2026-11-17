@@ -1,0 +1,1 @@
+{"allow_workflow_edits":false,"auto_merge":false,"backend":"codex","event_log_verbosity":"full","global_daily_cap_usd":0,"mission_width":2,"profiles":{"ubuntu":{"runs_on":["ubuntu-latest"],"timeout_minutes":60}},"slice_seconds":2400,"validation_commands":[["python","-m","pip","install","-e",".","pytest","httpx"],["python","-m","pytest","tests/github_host","-q"]]}
