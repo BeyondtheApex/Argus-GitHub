@@ -1,0 +1,105 @@
+diff --git a/.github/workflows/desktop-cache.yml b/.github/workflows/desktop-cache.yml
+index 9828425..2de888d 100644
+--- a/.github/workflows/desktop-cache.yml
++++ b/.github/workflows/desktop-cache.yml
+@@ -50,8 +50,10 @@ jobs:
+           node-version: '22.12.0'
+           cache: npm
+           cache-dependency-path: desktop-tauri/package-lock.json
+-      - uses: dtolnay/rust-toolchain@stable
+-      - uses: Swatinem/rust-cache@v2
++      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
++        with:
++          toolchain: stable
++      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+         with:
+           workspaces: desktop-tauri/src-tauri
+           shared-key: desktop-${{ matrix.platform }}
+diff --git a/.github/workflows/desktop-trial.yml b/.github/workflows/desktop-trial.yml
+index 5a22a52..947dd0a 100644
+--- a/.github/workflows/desktop-trial.yml
++++ b/.github/workflows/desktop-trial.yml
+@@ -19,7 +19,7 @@ jobs:
+     strategy:
+       fail-fast: false
+       matrix:
+-        os: [windows-latest, macos-14, macos-15-intel]
++        os: [windows-latest, macos-15, macos-15-intel]
+     runs-on: ${{ matrix.os }}
+     steps:
+       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+@@ -29,7 +29,9 @@ jobs:
+       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+         with:
+           node-version: '22'
+-      - uses: dtolnay/rust-toolchain@stable
++      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
++        with:
++          toolchain: stable
+       - name: Install build dependencies
+         run: |
+           python -m pip install -e ".[trial]" pytest "pyinstaller>=6.11,<7" tzdata
+diff --git a/.github/workflows/extended.yml b/.github/workflows/extended.yml
+index e80243f..211961d 100644
+--- a/.github/workflows/extended.yml
++++ b/.github/workflows/extended.yml
+@@ -266,12 +266,13 @@ jobs:
+         with:
+           python-version: '3.11'
+           cache: pip
+-      - uses: dtolnay/rust-toolchain@stable
++      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+         with:
++          toolchain: stable
+           target: x86_64-pc-windows-msvc
+       # Same key as the release workflow, so every push to main leaves a warm
+       # dependency cache for the next tagged desktop build.
+-      - uses: Swatinem/rust-cache@v2
++      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+         with:
+           workspaces: desktop-tauri/src-tauri
+           shared-key: desktop-windows-x86_64
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 4587b71..58110c5 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -128,7 +128,7 @@ jobs:
+             pyproject.toml
+             uv.lock
+             desktop-tauri/scripts/windows-build-requirements.txt
+-      - uses: dtolnay/rust-toolchain@stable
++      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+         with:
+           toolchain: ${{ runner.os == 'Windows' && '1.98.0-x86_64-pc-windows-msvc' || 'stable' }}
+       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+@@ -140,7 +140,7 @@ jobs:
+       # the single longest step on every platform (10 min on the Intel Mac
+       # runner). Keep the compiled dependencies between runs. Only main saves,
+       # so tag builds restore main's cache instead of leaving one-off copies.
+-      - uses: Swatinem/rust-cache@v2
++      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+         with:
+           workspaces: desktop-tauri/src-tauri
+           shared-key: desktop-${{ matrix.platform }}
+@@ -233,7 +233,7 @@ jobs:
+         with:
+           name: python-dist
+           path: dist
+-      - uses: pypa/gh-action-pypi-publish@release/v1
++      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+         with:
+           skip-existing: true
+ 
+diff --git a/tests/desktop/test_windows_release_workflow.py b/tests/desktop/test_windows_release_workflow.py
+index 703d1d2..8075146 100644
+--- a/tests/desktop/test_windows_release_workflow.py
++++ b/tests/desktop/test_windows_release_workflow.py
+@@ -51,7 +51,7 @@ def test_windows_dispatch_selects_one_explicit_msvc_runner():
+ def test_windows_toolchain_pins_leave_other_platform_inputs_unchanged():
+     assert _action("actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020")["with"]["node-version"] == "${{ runner.os == 'Windows' && '24.19.0' || '22.12.0' }}"
+     assert _action("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065")["with"]["python-version"] == "${{ runner.os == 'Windows' && '3.11.9' || '3.12' }}"
+-    assert _action("dtolnay/rust-toolchain@stable")["with"]["toolchain"] == "${{ runner.os == 'Windows' && '1.98.0-x86_64-pc-windows-msvc' || 'stable' }}"
++    assert _action("dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca")["with"]["toolchain"] == "${{ runner.os == 'Windows' && '1.98.0-x86_64-pc-windows-msvc' || 'stable' }}"
+     uv = _action("astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86")
+     assert uv["if"] == "runner.os == 'Windows'"
+     assert uv["with"]["version"] == "0.12.16"
