@@ -67,7 +67,7 @@ def rebase(files: dict[str, bytes], state_root: Path, source: Path, *, portable:
     return result
 
 
-def configure_provider_state(root: Path, *, owner: str) -> None:
+def configure_provider_state(root: Path, *, owner: str, settings: dict[str, Any] | None = None) -> None:
     """Use a private persisted provider home, never the host user's login files."""
     from ..core.portable_filename import portable_filename_component
     home = root / 'provider-sessions' / portable_filename_component(owner, windows=True)
@@ -78,4 +78,4 @@ def configure_provider_state(root: Path, *, owner: str) -> None:
     if os.environ.get('OPENAI_API_KEY'):
         os.environ['CODEX_API_KEY'] = os.environ['OPENAI_API_KEY']
     from .model_provider import configure
-    configure(home / 'codex')
+    configure(home / 'codex', settings)

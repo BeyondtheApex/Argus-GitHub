@@ -66,10 +66,16 @@ class OpenAIProvider:
         (home / 'config.toml').write_text(content, encoding='utf-8')
 
 
-def configure(home: Path) -> None:
+def configure(home: Path, settings: Mapping | None = None) -> None:
     provider = OpenAIProvider.read(os.environ)
     if provider is not None:
         provider.write(home)
+        # Native research tools also call the API vault directly, outside the
+        # Codex CLI. Give those text routes the same catalog; explicit per-role
+        # settings remain authoritative, and modality-specific models stay separate.
+        for role in ('engineer', 'reviewer', 'planner', 'manager', 'curator', 'text', 'author'):
+            model = (settings or {}).get(role + '_model') or provider.model
+            os.environ.setdefault('ARGUS_SKILL_' + role.upper() + '_MODEL', str(model))
 
 
 def apply_role_defaults(options: dict) -> None:

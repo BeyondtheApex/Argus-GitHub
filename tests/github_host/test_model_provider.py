@@ -14,7 +14,11 @@ from argus.github_host.model_provider import OpenAIProvider, apply_role_defaults
 from argus.github_host.portability import configure_provider_state
 from argus.github_host.protocol import ContractError
 from argus.github_host.snapshots import capture, make_delta, merge_delta
-from argus.tools.capability_vault import read_codex_default_model, read_codex_provider_config
+from argus.tools.capability_vault import (
+    load_model_api_route,
+    read_codex_default_model,
+    read_codex_provider_config,
+)
 
 
 @pytest.fixture
@@ -36,6 +40,8 @@ def test_custom_catalog_and_native_role_defaults_are_preserved(provider_env, tmp
     assert read_codex_provider_config().base_url == 'https://provider.example.test/v1'
     assert read_codex_default_model() == 'provider-native-model'
     assert not backend_uses_openai_catalog('codex')
+    for role in ('engineer', 'reviewer', 'planner', 'curator', 'text', 'author'):
+        assert load_model_api_route(role).model == 'provider-native-model'
     options = {'backend': 'codex', 'reviewer_model': 'explicit-review-model'}
     apply_role_defaults(options)
     assert options['engineer_model'] == 'provider-native-model'
@@ -69,6 +75,12 @@ def test_session_state_persists_but_secret_derived_route_config_cannot(provider_
     injected = {'provider-sessions/controller/codex/config.toml': b'api_key="unsafe"'}
     with pytest.raises(ContractError, match='Ephemeral provider'):
         merge_delta({}, {}, make_delta({}, injected))
+
+
+def test_direct_research_routes_keep_explicit_role_choices(provider_env, tmp_path):
+    configure_provider_state(tmp_path, owner='worker', settings={'reviewer_model': 'review-only-model'})
+    assert load_model_api_route('reviewer').model == 'review-only-model'
+    assert load_model_api_route('text').model == 'provider-native-model'
 
 
 class FixtureRunner:

@@ -177,7 +177,7 @@ def execute(args: argparse.Namespace) -> None:
     restore(state_root, rebase(before, state_root, source, portable=False))
     from .sqlite_state import materialize
     materialize(state_root)
-    configure_provider_state(state_root, owner=task.item_id if task else 'controller')
+    configure_provider_state(state_root, owner=task.item_id if task else 'controller', settings=manifest['settings'])
     os.environ.update(ARGUS_SKILL_HOME=str(state_root), ARGUS_GITHUB_HOST='1',
                       ARGUS_GITHUB_WORKTREE=str(source), ARGUS_GITHUB_TASK_ID=task.id if task else 'controller',
                       ARGUS_SKILL_SESSION_ID=project.id,

@@ -57,6 +57,8 @@ flowchart LR
 
 执行时为该角色的隔离 `CODEX_HOME` 生成 named provider 配置，以环境变量引用密钥。配置文件不写入持久记忆；会话和其他原生状态继续恢复。Engineer/Reviewer 没有显式模型设置时采用 `OPENAI_MODEL`，已经显式选择的角色模型继续有效；其他角色通过原生 provider 配置解析模型，不强制套用 OpenAI 的默认廉价模型。
 
+原生研究工具直接调用 API 的文本路由也使用相同模型选择。图像生成、图像审阅等独立模态仍需服务商提供相应能力及原生 route 配置；文本 API 检查通过不代表这些模态已经验证。
+
 配置后运行 **Argus model connection and resume**。它在第一个 runner 上通过原生 AgentCliRunner 读取随机验证文件，保存会话；另一个独立 runner 恢复同一会话，在没有原文件且禁用工具的情况下回忆内容。同时检查原生完成状态、会话身份和 usage 计量。它会产生实际模型请求及相应费用，但不会恢复真实项目、启动长期任务或升级 runtime。
 
 检查结果保存为 Actions artifact。缺配置、接口协议不支持、恢复失败或凭据出现在 checkpoint 中都会明确失败。这只是连接、工具、计量和跨 runner 会话检查，**不等于软件重构/研究质量或性能配对基准通过**。
