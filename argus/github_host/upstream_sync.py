@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 from .git_store import GitStore
-from .github import GitHub
+from .github import GitHub, GitHubError
 from .protocol import commit_sha
 
 
@@ -27,11 +27,22 @@ def main() -> int:
     branch = 'argus/upstream-' + latest[:16]
     owner = api.repository.split('/')[0]
     prs = api.request('GET', f'/pulls?state=open&head={owner}:{branch}')
+    workflow_authorized = os.environ.get('ARGUS_UPSTREAM_CAN_WRITE_WORKFLOWS') == 'true'
+    resume_blocked = False
     if prs:
-        print('Existing upstream candidate: ' + prs[0]['html_url'])
-        return 0
+        if workflow_authorized:
+            try:
+                api.request('GET', '/contents/.argus-host/upstream-blocked.json?ref=' + prs[0]['head']['sha'])
+                resume_blocked = True
+            except GitHubError as error:
+                if error.status != 404:
+                    raise
+        if not resume_blocked:
+            print('Existing upstream candidate: ' + prs[0]['html_url'])
+            return 0
     with GitStore(api.repository, token=api._token, branch=branch) as candidate:
-        candidate.load(revision=current)
+        base = prs[0]['head']['sha'] if resume_blocked else current
+        candidate.load(revision=base)
         candidate.git('fetch', '--unshallow', 'origin', metadata['default_branch'])
         candidate.git('remote', 'add', 'upstream', 'https://github.com/' + repository + '.git')
         candidate.git('fetch', 'upstream', config['branch'])
@@ -45,15 +56,32 @@ def main() -> int:
             body = ('Upstream merge requires adapter reconciliation. This branch records the exact conflicting paths; '
                     'it does not contain a successful upstream merge.\n\n' + '\n'.join('- `' + path + '`' for path in report['conflicts']))
         else:
-            candidate.write('.argus-host/upstream.json', {**config, 'commit': latest})
-            candidate.commit_local('Record candidate upstream revision; retain explicit seam gate')
-            body = ('Isolated upstream merge candidate. The seam lock is intentionally unchanged: any upstream '
-                    'contract changes require inspection and regression evidence before updating it. '
-                    'Runtime promotion is a separate checkpointed operation after compatibility and model acceptance.')
+            workflow_changes = candidate.git('diff', '--name-only', current, 'HEAD', '--', '.github/workflows/').stdout.decode().splitlines()
+            if workflow_changes and not workflow_authorized:
+                patch = candidate.git('diff', '--binary', current, 'HEAD').stdout
+                candidate.git('reset', '--hard', current)
+                candidate.write('.argus-host/upstream-blocked.json', {'upstream_sha': latest, 'source_sha': current,
+                    'reason': 'workflow_write_permission_required', 'workflow_paths': workflow_changes})
+                (candidate.root / '.argus-host/upstream-candidate.patch').write_bytes(patch)
+                candidate.commit_local('Retain complete upstream patch awaiting workflow-write authorization')
+                body = ('Upstream candidate is BLOCKED, not applied. The default Actions token cannot update workflow files. '
+                    'The complete merge diff is retained in `.argus-host/upstream-candidate.patch`; no upstream changes were silently omitted. '
+                    'Configure a repository-scoped `ARGUS_UPSTREAM_TOKEN` with Contents, Pull requests, Actions and Workflows write permissions, '
+                    'then rerun Argus upstream candidate to update this same PR. Alternatively apply and inspect the patch from an authorized local checkout. '
+                    'The explicit blocked marker prevents compatibility approval and runtime promotion.')
+            else:
+                for name in ('upstream-blocked.json', 'upstream-candidate.patch'):
+                    (candidate.root / '.argus-host' / name).unlink(missing_ok=True)
+                candidate.write('.argus-host/upstream.json', {**config, 'commit': latest})
+                candidate.commit_local('Record candidate upstream revision; retain explicit seam gate')
+                body = ('Isolated upstream merge candidate. The seam lock is intentionally unchanged: any upstream '
+                        'contract changes require inspection and regression evidence before updating it. '
+                        'Runtime promotion is a separate checkpointed operation after compatibility and model acceptance.')
         candidate.git('push', 'origin', f'HEAD:refs/heads/{branch}')
-    pr = api.request('POST', '/pulls', {'title': 'Upstream Argus candidate ' + latest[:12],
-        'head': branch, 'base': metadata['default_branch'], 'draft': True,
-        'body': body + f'\n\nUpstream: `{latest}`. Previous pin: `{config["commit"]}`.'})
+    description = body + f'\n\nUpstream: `{latest}`. Previous pin: `{config["commit"]}`.'
+    pr = (api.request('PATCH', '/pulls/' + str(prs[0]['number']), {'body': description}) if resume_blocked
+          else api.request('POST', '/pulls', {'title': 'Upstream Argus candidate ' + latest[:12],
+            'head': branch, 'base': metadata['default_branch'], 'draft': True, 'body': description}))
     print(pr['html_url'])
     api.request('POST', '/actions/workflows/argus-host-ci.yml/dispatches', {'ref': branch})
     # Agent-facing work is a structured, trusted event. It does not revise the

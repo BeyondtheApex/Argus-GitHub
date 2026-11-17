@@ -92,3 +92,26 @@ def test_native_preferences_cannot_raise_repository_budget():
     base = {'global_daily_cap_usd': 10, 'global_daily_token_cap': 10000}
     assert effective(base, {'ARGUS_SKILL_GLOBAL_DAILY_CAP_USD': '0', 'ARGUS_SKILL_GLOBAL_DAILY_TOKEN_CAP': '20000'}) == base
     assert effective(base, {'ARGUS_SKILL_GLOBAL_DAILY_CAP_USD': '5'})['global_daily_cap_usd'] == 5
+
+
+def test_failed_remote_runner_releases_native_wait_and_marks_learning_failed():
+    from argus.github_host.host import restore_failed_remote
+    class Store:
+        def __init__(self):
+            self.files = {'runtime/answer-learning.sqlite3': {'$argus_sqlite': 1, 'tables': {
+                'jobs': {'rows': {'key': {'values': {'id': 'job', 'status': 'running'}}}}}}}
+        def read(self, path, default=None):
+            return self.files.get(path, default)
+        def write(self, path, value):
+            self.files[path] = value
+    store = Store()
+    state = Project(1, 'owner/repo', 'goal', 'a' * 40, 'b' * 40)
+    remote = Task('remote', 'lane::child', 1, 'a' * 40, 'b' * 40, 'c' * 40, role='subagent', state='failed', last_error='runner lost').json()
+    restore_failed_remote(store, state, remote)
+    restore_failed_remote(store, state, remote)
+    record = next(value for path, value in store.files.items() if path.startswith('runtime/subagent-registry/'))
+    assert record['state'] == 'error' and record['pid'] is None
+    assert len(state.accepted_requests) == 1
+    learning = Task('learn', 'job', 1, 'a' * 40, 'b' * 40, 'c' * 40, role='learning', state='failed', evidence={'learning_job': 'job'}, last_error='runner lost').json()
+    restore_failed_remote(store, state, learning)
+    assert store.files['runtime/answer-learning.sqlite3']['tables']['jobs']['rows']['key']['values']['status'] == 'failed'

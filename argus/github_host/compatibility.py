@@ -62,6 +62,9 @@ def main() -> int:
     parser.add_argument('--root', type=Path, default=Path('.'))
     parser.add_argument('--record', action='store_true')
     args = parser.parse_args()
+    for marker in ('upstream-blocked.json', 'upstream-conflict.json'):
+        if (args.root / '.argus-host' / marker).exists():
+            raise SystemExit('Unresolved upstream candidate: .argus-host/' + marker)
     path = args.root / '.argus-host/compatibility.json'
     actual = fingerprint(args.root)
     if args.record:

@@ -320,6 +320,8 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
     if outcome.get('status') == 'host_error' and task.role == 'mission':
         restore_failed_item(store.root / 'runtime', project, task.id)
         project.tasks[task.id]['evidence']['recovered'] = True
+    elif outcome.get('status') == 'host_error' and task.role in {'learning', 'subagent'}:
+        restore_failed_remote(store, project, project.tasks[task.id])
     store.write(PROJECT_PATH, project.json())
     return 'accepted'
 
@@ -365,7 +367,9 @@ def flush_dispatches(store: GitStore, api: GitHub, *, lease_seconds: int = 21600
         task.run_id = run_id
         task.state = 'dispatched'
         task.dispatched_at = time.time()
-        task.lease_until = time.time() + lease_seconds
+        # A self-hosted profile may legitimately outlive the hosted six-hour
+        # default. Include preparation/checkpoint time in its authorized lease.
+        task.lease_until = time.time() + max(lease_seconds, int(profile.get('timeout_minutes', 60)) * 60 + 1800)
         operation['status'] = 'submitted'
         project.tasks[task.id] = task.json()
         count += 1
@@ -443,6 +447,8 @@ def recover_failed_runs(store: GitStore, project: Project) -> int:
             continue
         if task['role'] != 'mission':
             task['evidence']['recovered'] = True
+            if task['role'] in {'learning', 'subagent'}:
+                restore_failed_remote(store, project, task)
             if task['role'] == 'api':
                 import base64
 
@@ -456,3 +462,31 @@ def recover_failed_runs(store: GitStore, project: Project) -> int:
         task['evidence']['recovered'] = True
         recovered += 1
     return recovered
+
+
+def restore_failed_remote(store: GitStore, project: Project, task: dict[str, Any]) -> None:
+    """A lost runner must not leave its native remote work permanently live."""
+    if task['role'] == 'subagent':
+        from ..core.portable_filename import portable_filename_component
+        name = portable_filename_component(task['item_id'], windows=True)
+        path = 'runtime/subagent-registry/' + name + '.json'
+        record = store.read(path, {'task_id': task['item_id']})
+        record.update(state='error', transport='github-actions', pid=None, worker_pid=None,
+                      error=task['last_error'], completed_at=time.time())
+        store.write(path, record)
+    elif task['role'] == 'learning':
+        path = 'runtime/answer-learning.sqlite3'
+        database = store.read(path)
+        if database and database.get('$argus_sqlite') == 1:
+            for row in database['tables']['jobs']['rows'].values():
+                job = row['values']
+                if job['id'] == task['evidence']['learning_job'] and job['status'] not in {'completed', 'unchanged'}:
+                    job.update(status='failed', updated=time.time(), outcome=json.dumps({
+                        'reason': 'runner_interrupted', 'error': task['last_error'], 'counts': {}, 'items': []}))
+            store.write(path, database)
+    task['evidence']['recovered'] = True
+    request_id = f'remote-failure-{task["id"]}-{task["attempt"]}'
+    if not any(row['id'] == request_id for row in project.accepted_requests):
+        project.accepted_requests.append({'id': request_id, 'approved_by': 'run-reconciler',
+            'payload': {'text': f'Remote {task["role"]} {task["item_id"]} failed in Actions run {task.get("run_id")}: '
+                f'{task["last_error"]}. The native work is marked failed; inspect evidence and revise or explicitly retry.'}})

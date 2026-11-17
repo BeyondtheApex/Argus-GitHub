@@ -123,6 +123,8 @@ Git CAS 拒绝旧快照覆盖新状态。先提交 outbox，再派发 Action；�
 
 `Argus upstream candidate` 定时读取 `.argus-host/upstream.json` 指定上游，建立隔离候选和 draft PR。冲突会形成可审查报告；不会静默修改当前运行版本。私有集成接口的 AST 指纹在 `.argus-host/compatibility.json`，更新指纹必须先理解变化并通过回归，不能把重新生成文件当成验收。
 
+上游改变 workflow 时，默认 `GITHUB_TOKEN` 无法发布这些修改。可配置仅限该仓库、具备 Contents / Pull requests / Actions / Workflows 写权限的 `ARGUS_UPSTREAM_TOKEN`，仅可信同步作业使用它。未配置时自动生成含**完整升级补丁**的 blocked draft PR；不会部分更新并宣称完成。配置后重跑同步会继续更新同一个 PR。也可用有权限的本地 Git 应用该补丁再审查。blocked/conflict 标记会使兼容门禁失败。
+
 升级门禁：项目暂停、已派发任务与 PR 审核结束、候选 exact SHA 兼容 CI 成功、`.argus-host/state-format.json` 完全兼容、真实模型非退化报告通过。pending 任务保持自己的旧 runtime 和快照，不在升级时强行改写。
 
 模型报告独立提交到 `.argus-host/acceptance.json`，使用 `evidence_sha` 固定报告版本。它必须包含基线与候选 SHA、固定 backend/model/dataset、软件重构、研究改道、故障恢复、完成判断四类场景，每类至少三组 native/host 配对观测，以及 evaluator 和 evidence 引用。分别报告质量、tokens、模型时间与 Actions 调度时间。格式与验证入口见 `argus/github_host/evaluation.py`：

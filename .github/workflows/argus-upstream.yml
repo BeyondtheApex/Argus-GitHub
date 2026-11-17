@@ -22,5 +22,6 @@ jobs:
       - uses: ./runtime/.github/actions/argus-host-setup
       - working-directory: runtime
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.ARGUS_UPSTREAM_TOKEN || github.token }}
+          ARGUS_UPSTREAM_CAN_WRITE_WORKFLOWS: ${{ secrets.ARGUS_UPSTREAM_TOKEN != '' }}
         run: python -m argus.github_host.upstream_sync
