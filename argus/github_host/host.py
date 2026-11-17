@@ -130,6 +130,9 @@ def ingest_commands(store: GitStore, project: Project) -> list[str]:
                         project.source_sha, store.base, role='api', evidence={'request': request})
             project.queue(task)
         consumed.append(command['id'])
+        store.write('commands/' + identifier(command['id']) + '.json', {
+            'status': 'applied', 'kind': command['kind'], 'project_status': project.status,
+            'goal_revision': project.goal_revision})
         destination = store.root / 'receipts' / path.name
         destination.parent.mkdir(parents=True, exist_ok=True)
         path.replace(destination)
@@ -222,6 +225,10 @@ def accept_worker(store: GitStore, result: dict[str, Any], *, api: GitHub | None
         updated = merge_delta(base, current, result['delta'])
     except ContractError as error:
         task.state = 'blocked'
+        from .budgets import settle
+        # Usage in a rejected state delta is not yet in the authoritative
+        # ledger. Retain its liability until reconciliation/acknowledgement.
+        settle(project, f'{task.id}.{task.attempt}', {'pricing_status': 'unpriced'})
         task.result_digest = digest(result)
         task.last_error = 'Native state merge requires reconciliation: ' + str(error)
         project.tasks[task.id] = task.json()

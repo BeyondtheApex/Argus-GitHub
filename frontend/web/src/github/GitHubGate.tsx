@@ -1,7 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { command, connect, disconnect, hostConnection, hostPending, readState, subscribeHost } from './transport';
+import { command, connect, disconnect, hostConnection, hostPending, readState, refreshPending, subscribeHost } from './transport';
 
 type Project = { id: string; objective: string; status: string; goal_revision: number; runtime_sha: string };
+type Intake = { number: number; title: string; body: string; content_hash: string };
 
 function savedRepository(): string {
   try { return localStorage.getItem('argus-repository') || import.meta.env.VITE_GITHUB_REPOSITORY || ''; }
@@ -17,13 +18,17 @@ export default function GitHubGate({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [intake, setIntake] = useState<Intake[]>([]);
   useEffect(() => subscribeHost(() => setRevision(value => value + 1)), []);
   const host = hostConnection();
   useEffect(() => {
     if (!host) return;
     let stopped = false;
-    const refresh = () => readState<Project>('host/project.json', true)
-      .then(value => { if (!stopped) setProject(value); })
+    const refresh = () => Promise.all([readState<Project>('host/project.json', true), refreshPending(),
+      readState<Record<string, Intake>>('unapproved/index.json', true).then(rows => { if (!stopped) setIntake(Object.values(rows)); }).catch(reason => {
+        if (!String(reason).includes('404')) throw reason;
+      })])
+      .then(([value]) => { if (!stopped) setProject(value); })
       .catch(reason => { if (!stopped && !String(reason).includes('404')) setError(String(reason)); });
     void refresh();
     const timer = setInterval(() => { if (!document.hidden) void refresh(); }, 15_000);
@@ -68,8 +73,19 @@ export default function GitHubGate({ children }: { children: ReactNode }) {
       <span className="ml-auto">{host.login}</span><button onClick={() => { disconnect(); setProject(null); }}>断开授权</button>
     </div>
     {(notice || error || jobs.length > 0) && <div className="border-b px-4 py-2 text-xs" role="status">
-      {error || notice}{jobs.map(job => <div key={job.id}>{job.id} · {job.state} · {job.path}</div>)}
+      {error || notice}{jobs.map(job => <div key={job.id}>{job.path} · {job.state}{job.error && ` · ${job.error}`} {job.url && <a className="underline" href={job.url} target="_blank" rel="noreferrer">查看这次运行</a>}</div>)}
     </div>}
+    {project && <details className="border-b border-line bg-paper p-4 text-sm text-ink">
+      <summary>仓库长期目标与待审核请求（{intake.length}）</summary>
+      <p className="my-3 whitespace-pre-wrap">{project.objective}</p>
+      <p className="text-xs">用户请求作为输入交给原生主控评估，不会直接覆盖这个目标。只有维护者明确修改目标才创建新版本。</p>
+      {intake.map(row => <article className="my-3 rounded border border-line p-3" key={row.number}>
+        <a className="underline" target="_blank" rel="noreferrer" href={`https://github.com/${host.repository}/issues/${row.number}`}>#{row.number} {row.title}</a>
+        <pre className="my-2 max-h-64 overflow-auto whitespace-pre-wrap font-sans">{row.body}</pre>
+        <p className="break-all text-xs">内容版本：{row.content_hash}</p>
+        {host.canWrite && <button className="mt-2 rounded border px-3 py-1" disabled={busy} onClick={() => void control('approve-issue', { number: row.number, content_hash: row.content_hash })}>批准这份内容进入主控流程</button>}
+      </article>)}
+    </details>}
     {project ? children : <section className="mx-auto max-w-xl space-y-4 p-8">
       <h1 className="text-xl font-semibold">建立这个仓库的长期目标</h1>
       <p className="text-sm">先在仓库 Secrets 配置模型凭据，并检查 .argus-host/config.json。目标会成为版本化的权威状态。</p>

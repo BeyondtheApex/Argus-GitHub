@@ -2,7 +2,7 @@
 export const githubMode = import.meta.env.VITE_ARGUS_HOST === 'github';
 type Receipt = { status: number; content_type: string; body_b64: string; path?: string };
 export type Connection = { repository: string; branch: string; defaultBranch: string; login: string; canWrite: boolean };
-export type Pending = { id: string; path: string; state: 'accepted' | 'waiting' | 'completed' | 'failed'; started: number };
+export type Pending = { id: string; path: string; state: 'accepted' | 'waiting' | 'completed' | 'failed'; started: number; kind?: 'api' | 'command'; runId?: number; url?: string; error?: string };
 let connection: Connection | undefined;
 let credential = '';
 const cache = new Map<string, { etag: string; value: unknown; at: number }>();
@@ -12,12 +12,19 @@ const inflight = new Map<string, Promise<Response>>();
 const apiRoot = 'https://api.github.com';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+let generation = 0;
 
 export function subscribeHost(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn); }; }
-function notify() { for (const fn of listeners) fn(); }
+function notify() {
+  if (connection) {
+    try { sessionStorage.setItem('argus-pending:' + connection.repository, JSON.stringify([...pending.values()].slice(-100))); }
+    catch { /* Request metadata is recoverable from GitHub even if local storage is unavailable. */ }
+  }
+  for (const fn of listeners) fn();
+}
 export function hostConnection() { return connection; }
 export function hostPending() { return [...pending.values()]; }
-export function disconnect() { credential = ''; connection = undefined; cache.clear(); pending.clear(); notify(); }
+export function disconnect() { generation++; credential = ''; connection = undefined; cache.clear(); pending.clear(); inflight.clear(); notify(); }
 
 async function github(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
@@ -35,6 +42,7 @@ async function github(path: string, init: RequestInit = {}): Promise<Response> {
 
 export async function connect(repository: string, token: string): Promise<Connection> {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Use owner/repository.');
+  disconnect();
   credential = token.trim();
   try {
     const repo = await (await github(`/repos/${repository}`)).json();
@@ -42,6 +50,10 @@ export async function connect(repository: string, token: string): Promise<Connec
     connection = { repository, branch: 'argus-state', defaultBranch: repo.default_branch,
       login: user.login, canWrite: Boolean(repo.permissions?.push) };
     cache.clear();
+    try {
+      const saved: Pending[] = JSON.parse(sessionStorage.getItem('argus-pending:' + repository) || '[]');
+      for (const row of saved) if (/^(ui-|dispatch-)[a-zA-Z0-9-]+$/.test(row.id) && typeof row.started === 'number') pending.set(row.id, row);
+    } catch { /* Only ids/statuses are saved; credentials and request bodies never are. */ }
     notify();
     return connection;
   } catch (error) { credential = ''; connection = undefined; throw error; }
@@ -69,13 +81,50 @@ export async function readState<T>(path: string, fresh = false): Promise<T> {
   return decoded as T;
 }
 
-export async function command(kind: string, payload: unknown): Promise<void> {
+export async function command(kind: string, payload: unknown): Promise<{ runId?: number; url?: string }> {
   const host = current();
   if (!host.canWrite || !credential) throw new Error('This action requires a repository maintainer token.');
-  await github(`/repos/${host.repository}/actions/workflows/argus-intake.yml/dispatches`, {
-    method: 'POST', body: JSON.stringify({ ref: host.defaultBranch,
+  const response = await github(`/repos/${host.repository}/actions/workflows/argus-intake.yml/dispatches`, {
+    method: 'POST', body: JSON.stringify({ ref: host.defaultBranch, return_run_details: true,
       inputs: { command: kind, payload: JSON.stringify(payload) } }),
   });
+  const details = response.status === 204 ? {} : await response.json();
+  const runId: number | undefined = details.workflow_run_id;
+  const url = runId ? `https://github.com/${host.repository}/actions/runs/${runId}` : undefined;
+  if (kind !== 'api' && runId) {
+    const id = 'dispatch-' + runId;
+    pending.set(id, { id, path: kind, kind: 'command', state: 'accepted', started: Date.now(), runId, url });
+    notify();
+  }
+  return { runId, url };
+}
+
+export async function refreshPending(): Promise<void> {
+  const host = current();
+  const epoch = generation;
+  for (const row of [...pending.values()]) {
+    if (row.state === 'completed' || row.state === 'failed') continue;
+    let next: Pending = { ...row, state: 'waiting' };
+    try {
+      if (row.kind === 'command') {
+        const receipt = await readState<{ status: string; error?: string }>(`commands/${row.id}.json`, true);
+        next = { ...row, state: receipt.status === 'applied' ? 'completed' : 'failed', error: receipt.error };
+      } else {
+        const receipt = await readState<Receipt>(`api/${row.id}.json`, true);
+        next = { ...row, state: receipt.status < 400 ? 'completed' : 'failed' };
+      }
+    } catch (error) {
+      if (!String(error).includes('GitHub 404:')) throw error;
+      if (row.runId) {
+        const run = await (await github(`/repos/${host.repository}/actions/runs/${row.runId}`)).json();
+        if (run.status === 'completed' && run.conclusion !== 'success')
+          next = { ...row, state: 'failed', error: `Intake Action: ${run.conclusion}` };
+      }
+    }
+    if (generation !== epoch) return;
+    pending.set(row.id, next);
+  }
+  if (generation === epoch) notify();
 }
 
 function normalize(path: string): string {
@@ -96,6 +145,7 @@ function responseFrom(receipt: Receipt) {
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 async function enqueue(path: string, init: RequestInit): Promise<Response> {
+  const epoch = generation;
   const method = (init.method || 'GET').toUpperCase();
   const id = 'ui-' + crypto.randomUUID();
   let body: unknown = undefined;
@@ -142,13 +192,15 @@ async function enqueue(path: string, init: RequestInit): Promise<Response> {
   } else if (typeof init.body === 'string') body = JSON.parse(init.body);
   const payload = { request_id: id, method, path: normalize(path), body, multipart, upload_id };
   if (encoder.encode(JSON.stringify(payload)).length > 60_000) throw new Error('Request is too large for Actions dispatch; attach the content in the repository.');
-  await command('api', payload);
-  pending.set(id, { id, path, state: 'accepted', started: Date.now() });
+  const receipt = await command('api', payload);
+  if (generation !== epoch) throw new Error('Connection changed; the accepted request remains recorded in GitHub.');
+  pending.set(id, { id, path, kind: 'api', state: 'accepted', started: Date.now(), ...receipt });
   notify();
   for (;;) {
     // Cancelling a subscription does not cancel an already accepted command.
     if (init.signal?.aborted) throw new DOMException(`Request ${id} remains queued in GitHub`, 'AbortError');
     await pause(document.hidden ? 30_000 : 8_000);
+    if (generation !== epoch) throw new Error(`Disconnected. Request ${id} remains recorded in GitHub.`);
     try {
       const receipt = await readState<Receipt>(`api/${id}.json`, true);
       pending.set(id, { ...pending.get(id)!, state: receipt.status < 400 ? 'completed' : 'failed' });
@@ -156,6 +208,8 @@ async function enqueue(path: string, init: RequestInit): Promise<Response> {
       return responseFrom(receipt);
     } catch (error) {
       if (!(error instanceof Error) || !error.message.startsWith('GitHub 404:')) throw error;
+      await refreshPending();
+      if (pending.get(id)?.state === 'failed') throw new Error(pending.get(id)?.error || `Request ${id} failed; inspect Actions.`);
       pending.set(id, { ...pending.get(id)!, state: 'waiting' }); notify();
       // Retain the receipt id for reopening after a long Actions queue.
       if (Date.now() - pending.get(id)!.started > 90 * 60_000)

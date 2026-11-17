@@ -274,9 +274,21 @@ def intake(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
     event_type = os.environ['GITHUB_EVENT_NAME']
     if event_type == 'issues':
         issue = event['issue']
-        store.write(f"unapproved/issue-{issue['number']}.json", {
+        from .protocol import digest
+        snapshot = {'number': issue['number'], 'title': issue['title'], 'body': issue.get('body') or ''}
+        content_hash = digest(snapshot)
+        record = {
             'number': issue['number'], 'title': issue['title'], 'body': issue.get('body') or '',
-            'updated_at': issue['updated_at']})
+            'updated_at': issue['updated_at'], 'content_hash': content_hash,
+            'approval_command': '/argus approve ' + content_hash}
+        store.write(f"unapproved/issue-{issue['number']}.json", record)
+        index = store.read('unapproved/index.json', {})
+        index[str(issue['number'])] = record
+        store.write('unapproved/index.json', index)
+        summary = os.environ.get('GITHUB_STEP_SUMMARY')
+        if summary:
+            with open(summary, 'a', encoding='utf-8') as stream:
+                stream.write(f"Issue #{issue['number']} collected without a model call. A maintainer can review the snapshot in Pages or approve this exact version with:\n\n`/argus approve {content_hash}`\n")
         store.publish('Collect issue without exposing its content to a model')
         return
     if event_type == 'issue_comment':
@@ -293,6 +305,19 @@ def intake(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
             from .web_bridge import normalize_path
             command['payload']['path'] = normalize_path(command['payload']['path'])
             identifier(command['payload']['request_id'])
+        if command['kind'] == 'approve-issue':
+            from .protocol import digest
+            payload = command['payload']
+            issue = api.request('GET', '/issues/' + str(int(payload['number'])))
+            snapshot = {'number': issue['number'], 'title': issue['title'], 'body': issue.get('body') or ''}
+            if digest(snapshot) != payload.get('content_hash'):
+                raise ContractError('Issue changed since review; reload the snapshot before approving')
+            command = {**command, 'kind': 'request', 'snapshot': snapshot,
+                       'content_hash': payload['content_hash'], 'payload': {}, 'goal_change': False}
+    if command.get('content_hash') and command.get('snapshot'):
+        index = store.read('unapproved/index.json', {})
+        index.pop(str(command['snapshot']['number']), None)
+        store.write('unapproved/index.json', index)
     if command['kind'] == 'initialize':
         if store.read(PROJECT_PATH) is not None:
             raise ContractError('Project already initialized; use an explicit goal revision')
@@ -324,13 +349,21 @@ def intake(args: argparse.Namespace, api: GitHub, store: GitStore) -> None:
         files = capture(state_root)
         replace_tree(state_root, files, rebase(files, state_root, worktree, portable=True))
         api.runtime_tag(runtime)
+        store.write('commands/' + command['id'] + '.json', {'status': 'applied', 'kind': 'initialize'})
         store.publish('Initialize repository identity and authoritative objective')
+    elif command['kind'] == 'configure':
+        from .configuration import replace_settings
+        project = read_project(store)
+        replace_settings(store, project, command['payload'])
+        store.write('commands/' + command['id'] + '.json', {'status': 'applied', 'kind': 'configure'})
+        store.publish('Apply authenticated execution settings after pause and drain')
     elif command['kind'] in {'promote-runtime', 'rollback-runtime'}:
         from .upgrades import promote, rollback
         project = read_project(store)
         operation = promote if command['kind'] == 'promote-runtime' else rollback
         operation(project, command['payload'], api, state_commit=store.base)
         store.write(PROJECT_PATH, project.json())
+        store.write('commands/' + command['id'] + '.json', {'status': 'applied', 'kind': command['kind']})
         store.publish('Record authenticated runtime version transition')
     else:
         read_project(store)

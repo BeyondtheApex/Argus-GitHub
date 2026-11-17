@@ -1,3 +1,5 @@
+> **GitHub 原生部署 fork：** [部署与操作指南](docs/github-host/README.zh-CN.md) · [实现边界与验收](docs/github-host/IMPLEMENTATION.md)。保留原生 Argus，将持久状态、独立 Worker 和界面适配到 GitHub。真实模型长期质量及性能仍待验收，不能用确定性 CI 代替。
+
 <div align="center">
 
 <picture>

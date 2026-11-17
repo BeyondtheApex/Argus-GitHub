@@ -26,7 +26,7 @@ def recover_controllers(store: Any, project: Project, api: Any, *, current_run: 
         if any(job['name'] == 'think' and job.get('conclusion') == 'success' for job in jobs):
             try:
                 proposal = download_json(api, int(run_id), artifact_name='argus-controller-proposal', filename='controller.json')
-                if proposal['id'] != key:
+                if proposal['id'] != key or proposal.get('runtime_sha') != run.get('head_sha'):
                     raise ContractError('Controller artifact identity mismatch')
                 project = publish_controller(store, proposal, settings=store.read('host/settings.json', {}))
                 store.publish('Recover completed controller proposal after publisher interruption')

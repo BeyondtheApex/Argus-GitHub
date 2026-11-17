@@ -41,3 +41,18 @@ def slice_limits(config: dict[str, Any], profile: str) -> tuple[dict[str, Any], 
     if duration <= 0:
         raise ContractError('Execution slice must leave time to checkpoint and upload')
     return {**config, 'slice_seconds': duration}, timeout
+
+
+def replace_settings(store: Any, project: Any, config: dict[str, Any]) -> None:
+    if project.status != 'paused' or any(row['state'] in {'dispatched', 'running', 'awaiting_review'} for row in project.tasks.values()):
+        raise ContractError('Pause and drain tasks before replacing repository execution settings')
+    if not isinstance(config, dict) or not config.get('backend') or not config.get('profiles'):
+        raise ContractError('Settings need an explicit backend and runner profiles')
+    if type(config.get('mission_width')) is not int or config['mission_width'] < 1:
+        raise ContractError('mission_width must be a positive integer')
+    for profile in config['profiles']:
+        slice_limits(config, profile)
+    commands = config.get('validation_commands', [])
+    if not isinstance(commands, list) or not all(isinstance(row, list) and row and all(isinstance(arg, str) for arg in row) for row in commands):
+        raise ContractError('Validation commands must be lists of argument strings')
+    store.write('host/settings.json', config)

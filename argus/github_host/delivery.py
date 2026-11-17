@@ -133,6 +133,21 @@ def reconcile_deliveries(store: GitStore, project: Project, api: GitHub, setting
         validation = max(matches, key=lambda row: row['id']) if matches else None
         if validation and validation['status'] == 'completed':
             delivery['validation'] = {'run_id': validation['id'], 'conclusion': validation['conclusion']}
+        if delivery.get('validation', {}).get('conclusion') in {'failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure'}:
+            delivery['state'] = 'rejected'
+            task = Task.read(project.tasks[task_id])
+            task.state, task.last_error = 'blocked', 'Independent candidate validation failed'
+            project.tasks[task_id] = task.json()
+            backlog = Backlog(store.root / 'runtime' / 'projects' / project.id / 'backlog.jsonl')
+            if any(item.id == task.item_id for item in backlog.history()):
+                backlog.update(task.item_id, status='failed', last_error=task.last_error)
+            project.accepted_requests.append({'id': f'validation-{task.id}-{delivery["validation"]["run_id"]}',
+                'kind': 'review', 'approved_by': 'github-delivery-reconciler',
+                'payload': {'text': f'Candidate PR #{delivery["pr"]} failed independent validation in Actions run '
+                    f'{delivery["validation"]["run_id"]}. Inspect its evidence and revise the approach before retrying.'}})
+            project.continuations = {'requested': True, 'reason': 'validation_failed'}
+            changed += 1
+            continue
         validated = delivery.get('validation', {}).get('conclusion') == 'success'
         if (settings.get('auto_merge', False) and validated and delivery['native_success']
                 and project.goal_revision == project.tasks[task_id]['goal_revision']

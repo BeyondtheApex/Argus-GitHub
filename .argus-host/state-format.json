@@ -1,0 +1,5 @@
+{
+  "host_schema": 1,
+  "snapshot_formats": ["files-v1", "sqlite-logical-v1"],
+  "supervisor_continuation": 1
+}

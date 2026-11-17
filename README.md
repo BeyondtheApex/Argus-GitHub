@@ -1,3 +1,5 @@
+> **GitHub-native deployment fork:** [Deployment and operations guide](docs/github-host/README.zh-CN.md) · [Architecture and acceptance boundaries](docs/github-host/IMPLEMENTATION.md). The original Argus runtime is retained; repository state, independent Actions workers and Pages provide the additional deployment target. Real-model long-running quality/performance acceptance is pending; deterministic CI is not a substitute.
+
 <div align="center">
 
 <picture>

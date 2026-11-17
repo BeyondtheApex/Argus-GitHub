@@ -4,6 +4,11 @@ This fork retains the upstream runtime. The repository host is an additional
 deployment target, not a replacement planner or a smaller research loop.
 Device Flow is deferred; the Pages client initially uses a fine-grained PAT.
 
+Deployment, controls, recovery, limits and upgrade policy are documented in
+[the operator guide](README.zh-CN.md). Runtime promotion requires a compatible
+state-format manifest and explicitly reviewed real-model acceptance evidence;
+fixture CI alone cannot approve a claimed non-regression.
+
 ## Boundaries
 
 - `argus/github_host`: repository protocol, durable state, versioned snapshots,
