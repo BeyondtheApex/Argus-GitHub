@@ -22,6 +22,11 @@ def requires_manual_review(pr: dict[str, Any], files: list[dict[str, Any]]) -> b
                for row in files for name in (row['filename'], row.get('previous_filename', '')))
 
 
+def workspace_marker(workspace_id: str) -> str:
+    """Machine-readable identity that lets reconciliation adopt its own PR."""
+    return f'<!-- argus-workspace: {workspace_id} -->'
+
+
 def publish_candidate(api: GitHub, task: Task, result: dict[str, Any], settings: dict[str, Any],
                       *, workspace_head: str | None = None) -> dict[str, Any] | None:
     encoded = result.get('changes', {}).get('patch_b64', '')
@@ -92,16 +97,22 @@ def _delivery_for_revision(api: GitHub, task: Task, result: dict[str, Any], revi
     if task.role == 'subagent' or not result['outcome'].get('success'):
         return {'state': 'checkpoint', 'head_sha': revision, 'workspace_id': workspace_id, 'branch': branch}
     owner = api.repository.split('/')[0]
-    prs = api.request('GET', f'/pulls?state=all&head={owner}:{branch}')
+    # Only an open PR can carry a new head: GitHub freezes a closed PR at the
+    # commit it was closed with, so adopting one after a rejected attempt
+    # would fail the head check forever. A retry opens a fresh PR instead.
+    marker = workspace_marker(workspace_id)
+    prs = api.request('GET', f'/pulls?state=open&head={owner}:{branch}')
     if prs:
         pr = prs[0]
+        if marker not in (pr.get('body') or '') and pr.get('title') != f'Argus: {task.item_id}':
+            raise ContractError('An open PR on the candidate branch was not created by this host')
         if pr['head']['sha'] != revision:
             raise ContractError('Candidate PR head changed unexpectedly')
     else:
         metadata = api.request('GET', '/')
         pr = api.request('POST', '/pulls', {
             'title': f'Argus: {task.item_id}', 'head': branch, 'base': settings.get('source_branch', metadata['default_branch']),
-            'body': f'Candidate for task `{task.id}`, attempt {task.attempt}.\n\n'
+            'body': f'{marker}\nCandidate for task `{task.id}`, attempt {task.attempt}.\n\n'
                     f'Goal revision: {task.goal_revision}. Source: `{task.source_sha}`.\n'
                     f'Native execution evidence: Actions run {result["run_id"]}.\n\n'
                     'Delivery remains pending until the candidate is validated and merged.',
