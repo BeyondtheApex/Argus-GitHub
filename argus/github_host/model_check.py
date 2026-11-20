@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 from ..agent_cli.agent_cli_runner import AgentCliRunner, RunnerOptions
+from ..core.run_gateway import run_exec as gateway_run_exec
 from .model_provider import OpenAIProvider
 from .portability import configure_provider_state, rebase
 from .protocol import ContractError, canonical, digest
@@ -54,8 +55,8 @@ def run_check(mode: str, *, root: Path, bundle: Path, output: Path,
               'Recall the exact contents of verification.txt from the previous turn. '
               'That file is not present on this machine. Reply with the contents only, without using tools.')
     started = time.monotonic()
-    result = runner.run_exec(prompt=prompt, resume_thread_id=prior['thread_id'] if prior else None,
-                             options=options, run_label='engineer-provider-check')
+    result = gateway_run_exec(runner, prompt=prompt, resume_thread_id=prior['thread_id'] if prior else None,
+                              options=options, run_label='engineer-provider-check')
     elapsed = time.monotonic() - started
     usage = [event['usage'] for event in result.json_events
              if event.get('type') == 'turn.completed' and isinstance(event.get('usage'), dict)]

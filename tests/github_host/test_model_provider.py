@@ -53,7 +53,7 @@ def test_custom_catalog_and_native_role_defaults_are_preserved(provider_env, tmp
 
 @pytest.mark.parametrize('update', [
     {'OPENAI_BASE_URL': ''}, {'OPENAI_MODEL': ''}, {'OPENAI_API_KEY': ''},
-    {'OPENAI_BASE_URL': 'https://user:password@provider.test/v1'},
+    {'OPENAI_BASE_URL': 'https://user:password@example.invalid/v1'},
     {'OPENAI_BASE_URL': 'https://provider.test/v1?api_key=unsafe'},
     {'OPENAI_BASE_URL': 'http://remote-provider.test/v1'},
     {'OPENAI_BASE_URL': 'https://[invalid'},
